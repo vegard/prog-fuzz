@@ -2,12 +2,14 @@
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
 #include <assert.h>
 #include <fcntl.h>
 #include <error.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -410,11 +412,19 @@ int main(int argc, char *argv[])
 				// Check for ICEs, but ignore a set of specific ones which we've
 				// already reported and which keep showing up.
 				if (strstr(buffer, "internal compiler error") && !strstr(buffer, "types may not be defined in parameter types") && !strstr(buffer, "internal compiler error: in synthesize_implicit_template_parm") && !strstr(buffer, "internal compiler error: in search_anon_aggr") && !strstr(buffer, "non_type_check") && !strstr(buffer, "internal compiler error: in xref_basetypes, at") && !strstr(buffer, "internal compiler error: in build_capture_proxy") && !strstr(buffer, "internal compiler error: tree check: expected record_type or union_type or qual_union_type, have array_type in reduced_constant_expression_p")) {
+					struct timeval tv;
+					if (gettimeofday(&tv, 0) == -1)
+						error(EXIT_FAILURE, errno, "gettimeofday()");
+
 					printf("ICE:\n");
 					root->print(stdout);
 					printf("\n");
 
-					FILE *fp = fopen("/tmp/random.cc", "w");
+					char filename[PATH_MAX];
+					snprintf(filename, sizeof(filename), "output/%lu.cc", tv.tv_sec);
+					printf("Writing reproducer to %s\n", filename);
+
+					FILE *fp = fopen(filename, "w");
 					if (!fp)
 						error(EXIT_FAILURE, errno, "fopen()");
 					root->print(fp);
