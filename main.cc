@@ -280,6 +280,8 @@ int main(int argc, char *argv[])
 	fixed_priority_queue<testcase> pq(1200);
 
 	unsigned int nr_execs = 0;
+	unsigned int nr_execs_without_new_bits = 0;
+
 	while (true) {
 #if 0
 		printf("queue: ");
@@ -289,12 +291,15 @@ int main(int argc, char *argv[])
 #endif
 
 #if 1 // periodically resetting (restarting) everything seems beneficial for now; interesting future angle WRT SAT solver restarts
-		if (nr_execs % 2500 == 0) {
+		if (nr_execs == 25000 || nr_execs_without_new_bits == 25) {
 			pq = fixed_priority_queue<testcase>(1200);
 			for (unsigned int i = 0; i < nr_mutations; ++i)
 				mutation_counters[i] = 0;
 			for (unsigned int i = 0; i < MAP_SIZE; ++i)
 				trace_bits_counters[i] = 0;
+
+			nr_execs = 0;
+			nr_execs_without_new_bits = 0;
 		}
 #endif
 
@@ -448,11 +453,16 @@ int main(int argc, char *argv[])
 				}
 			}
 
+			if (new_bits)
+				nr_execs_without_new_bits = 0;
+			else
+				++nr_execs_without_new_bits;
+
 			auto mutations = current.mutations;
 			mutations.insert(mutation);
 			testcase new_testcase(root, current.generation + 1, mutations, current.mutation_counter + ++mutation_counters[mutation], current.new_bits + new_bits);
 
-			printf("\e[31mcompiled (%u | score %.2f | %u | %u): \e[0m", nr_execs, new_testcase.score, pq.size(), new_bits);
+			printf("\e[31mcompiled (%u/%u | score %.2f | %u | %u): \e[0m", nr_execs, nr_execs_without_new_bits, new_testcase.score, pq.size(), new_bits);
 			root->print(stdout);
 			printf("\n");
 
