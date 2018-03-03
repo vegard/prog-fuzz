@@ -274,6 +274,13 @@ int main(int argc, char *argv[])
 	if (!devnullf)
 		error(EXIT_FAILURE, errno, "/dev/null: fdopen()");
 
+	struct timeval tv_start;
+	if (gettimeofday(&tv_start, 0) == -1)
+		error(EXIT_FAILURE, errno, "gettimeofday()");
+
+	static char stderr_filename[PATH_MAX];
+	snprintf(stderr_filename, sizeof(stderr_filename), "stderr-%lu.txt", tv_start.tv_sec);
+
 	unsigned int mutation_counters[nr_mutations] = {};
 	unsigned int trace_bits_counters[MAP_SIZE] = {};
 
@@ -341,7 +348,7 @@ int main(int argc, char *argv[])
 			close(pipefd[0]);
 			dup2(devnull, STDOUT_FILENO);
 
-			int stderr_fd = open("/tmp/stderr.txt", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+			int stderr_fd = open(stderr_filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 			if (stderr_fd == -1)
 				error(EXIT_FAILURE, errno, "open()");
 
@@ -403,7 +410,7 @@ int main(int argc, char *argv[])
 		}
 
 		{
-			FILE *f = fopen("/tmp/stderr.txt", "r");
+			FILE *f = fopen(stderr_filename, "r");
 			if (!f)
 				error(EXIT_FAILURE, errno, "fopen()");
 
