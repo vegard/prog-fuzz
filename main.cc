@@ -332,6 +332,10 @@ int main(int argc, char *argv[])
 		unsigned int mutation = std::uniform_int_distribution<int>(0, nr_mutations - 1)(re);
 		auto root = mutate(current.root, leaf, mutation);
 
+		struct timeval tv;
+		if (gettimeofday(&tv, 0) == -1)
+			error(EXIT_FAILURE, errno, "gettimeofday()");
+
 		int pipefd[2];
 		if (pipe2(pipefd, 0) == -1)
 			error(EXIT_FAILURE, errno, "pipe2()");
@@ -424,10 +428,6 @@ int main(int argc, char *argv[])
 				// Check for ICEs, but ignore a set of specific ones which we've
 				// already reported and which keep showing up.
 				if (strstr(buffer, "internal compiler error") && !strstr(buffer, "types may not be defined in parameter types") && !strstr(buffer, "internal compiler error: in synthesize_implicit_template_parm") && !strstr(buffer, "internal compiler error: in search_anon_aggr") && !strstr(buffer, "non_type_check") && !strstr(buffer, "internal compiler error: in xref_basetypes, at") && !strstr(buffer, "internal compiler error: in build_capture_proxy") && !strstr(buffer, "internal compiler error: tree check: expected record_type or union_type or qual_union_type, have array_type in reduced_constant_expression_p")) {
-					struct timeval tv;
-					if (gettimeofday(&tv, 0) == -1)
-						error(EXIT_FAILURE, errno, "gettimeofday()");
-
 					printf("ICE:\n");
 					root->print(stdout);
 					printf("\n");
