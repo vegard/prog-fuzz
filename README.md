@@ -61,3 +61,17 @@ GCC:
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84652>
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84653>
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84655>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84661>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84662>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84663>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84664>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84665>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84668>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84676>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84677>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84679>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84680>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84682>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84683>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84691>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84694>
