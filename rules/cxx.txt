@@ -75,6 +75,8 @@
 "unsigned [int]"
 "unsigned long long int"
 "long double"
+"short"
+"({ []; 0 })"
 "[unsigned int] [b]:[1];"
 "asm [volatile] (\"[]\" : \"=r\" ([x]) : \"r\" ([y])"
 "[T]::[x]"
