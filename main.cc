@@ -298,7 +298,7 @@ int main(int argc, char *argv[])
 #endif
 
 #if 1 // periodically resetting (restarting) everything seems beneficial for now; interesting future angle WRT SAT solver restarts
-		if (nr_execs == 25000 || nr_execs_without_new_bits == 25) {
+		if (nr_execs_without_new_bits == 50) {
 			pq = fixed_priority_queue<testcase>(1200);
 			for (unsigned int i = 0; i < nr_mutations; ++i)
 				mutation_counters[i] = 0;
