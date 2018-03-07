@@ -75,3 +75,22 @@ GCC:
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84683>
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84691>
 * <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84694>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84702>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84703>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84704>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84705>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84707>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84708>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84714>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84720>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84724>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84728>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84729>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84730>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84733>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84742>
+* <https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84745>
+
+Clang:
+
+* <https://bugs.llvm.org/show_bug.cgi?id=36626>
