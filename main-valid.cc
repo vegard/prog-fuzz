@@ -758,6 +758,8 @@ struct ident_allocator {
 };
 
 struct program {
+	int toplevel_value;
+
 	ident_allocator ids;
 
 	std::vector<statement_ptr> toplevel_decls;
@@ -766,7 +768,8 @@ struct program {
 	function_ptr toplevel_fn;
 	expr_ptr toplevel_call_expr;
 
-	explicit program(int toplevel_value)
+	explicit program(int toplevel_value):
+		toplevel_value(toplevel_value)
 	{
 		auto body = std::make_shared<block_statement>();
 		body->statements.push_back(std::make_shared<return_statement>(std::make_shared<int_literal_expression>(toplevel_value)));
@@ -774,7 +777,8 @@ struct program {
 		toplevel_call_expr = std::make_shared<call_expression>(std::make_shared<variable_expression>(toplevel_fn->name));
 	}
 
-	program(ident_allocator &ids, std::vector<statement_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+	program(int toplevel_value, ident_allocator &ids, std::vector<statement_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+		toplevel_value(toplevel_value),
 		ids(ids),
 		toplevel_decls(toplevel_decls),
 		toplevel_fns(toplevel_fns),
@@ -793,7 +797,7 @@ struct program {
 		for (auto &fn_ptr: toplevel_fns)
 			new_toplevel_fns.push_back(fn_ptr->clone());
 
-		return std::make_shared<program>(ids, new_toplevel_decls, new_toplevel_fns, toplevel_fn->clone(), toplevel_call_expr->clone(toplevel_call_expr));
+		return std::make_shared<program>(toplevel_value, ids, new_toplevel_decls, new_toplevel_fns, toplevel_fn->clone(), toplevel_call_expr->clone(toplevel_call_expr));
 	}
 
 	void visit(visitor &v)
@@ -1573,73 +1577,106 @@ static void setup_shm(void)
  *  - then try to extend the small test-cases one by one by applying a smaller number of transformations (?)
  */
 
-static const unsigned int nr_transformations_per_iteration = 200;
+static unsigned int trace_bits_counters[MAP_SIZE] = {};
+static unsigned int nr_bits;
 
-unsigned int trace_bits_counters[MAP_SIZE] = {};
-
-int main(int argc, char *argv[])
+static bool build_and_run(program_ptr p)
 {
-	re = std::default_random_engine(r());
+	FILE *fcurr = fopen("/tmp/current.cc", "w+");
+	if (!fcurr)
+		error(EXIT_FAILURE, errno, "fopen()");
+	p->print(fcurr);
+	fclose(fcurr);
 
-	int expected_result = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
-	auto p = std::make_shared<program>(expected_result);
-	auto new_p = p;
-#if 0
-	for (unsigned int i = 0; i < 300; ++i) {
-		auto transform = transformations[std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re)];
-		new_p = transform(new_p);
+	int pipefd[2];
+	if (pipe2(pipefd, 0) == -1)
+		error(EXIT_FAILURE, errno, "pipe2()");
+
+	setup_shm();
+
+	pid_t child = fork();
+	if (child == -1)
+		error(EXIT_FAILURE, errno, "fork()");
+
+	if (child == 0) {
+		close(pipefd[1]);
+		dup2(pipefd[0], STDIN_FILENO);
+		close(pipefd[0]);
+
+		if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-O3", "-Wno-div-by-zero", "-Wno-unused-value", "-Wno-int-to-pointer-cast", "-std=c++14", "-fpermissive", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
+		//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-Wall", "-std=c++14", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
+			error(EXIT_FAILURE, errno, "execvp()");
 	}
-#endif
 
-	unsigned int nr_failures = 0;
+	close(pipefd[0]);
+	FILE *f = fdopen(pipefd[1], "w");
+	if (!f)
+		error(EXIT_FAILURE, errno, "fdopen()");
+	p->print(f);
+	fclose(f);
 
-	unsigned int transformation_counters[transformations.size()] = {};
-
-	while (1) {
-		auto p = std::make_shared<program>(expected_result);
-		auto new_p = p;
-
-		std::vector<unsigned int> current_transformations;
-		for (unsigned int i = 0; i < 50; ++i) {
-			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
-			current_transformations.push_back(transformation_i);
-
-			auto transform = transformations[transformation_i];
-			new_p = transform(new_p);
+	int status;
+	while (true) {
+		pid_t kid = waitpid(child, &status, 0);
+		if (kid == -1) {
+			if (errno == EINTR || errno == EAGAIN)
+				continue;
+			error(EXIT_FAILURE, errno, "waitpid()");
 		}
 
-		FILE *fcurr = fopen("/tmp/current.cc", "w+");
-		if (!fcurr)
-			error(EXIT_FAILURE, errno, "fopen()");
-		new_p->print(fcurr);
-		fclose(fcurr);
+		if (kid != child)
+			error(EXIT_FAILURE, 0, "kid != child");
 
+		if (WIFEXITED(status) || WIFSIGNALED(status))
+			break;
+	}
+
+	if (WIFSIGNALED(status)) {
+		printf("cc1plus WIFSIGNALED()\n");
+		exit(1);
+	}
+
+	if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+		printf("cc1plus WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
+		exit(1);
+	}
+
+	// TODO
+	if (system("g++ prog.s") != 0)
+		error(EXIT_FAILURE, 0, "system()");
+
+	{
 		int pipefd[2];
 		if (pipe2(pipefd, 0) == -1)
 			error(EXIT_FAILURE, errno, "pipe2()");
-
-		setup_shm();
 
 		pid_t child = fork();
 		if (child == -1)
 			error(EXIT_FAILURE, errno, "fork()");
 
 		if (child == 0) {
-			close(pipefd[1]);
-			dup2(pipefd[0], STDIN_FILENO);
 			close(pipefd[0]);
+			dup2(pipefd[1], STDOUT_FILENO);
+			close(pipefd[1]);
 
-			if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-O3", "-Wno-div-by-zero", "-Wno-unused-value", "-Wno-int-to-pointer-cast", "-std=c++14", "-fpermissive", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
-			//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-Wall", "-std=c++14", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
-				error(EXIT_FAILURE, errno, "execvp()");
+			if (execl("./a.out", "./a.out", NULL) == -1)
+				error(EXIT_FAILURE, errno, "execl()");
 		}
 
-		close(pipefd[0]);
-		FILE *f = fdopen(pipefd[1], "w");
+		int actual_result = 0;
+
+		close(pipefd[1]);
+		FILE *f = fdopen(pipefd[0], "r");
 		if (!f)
 			error(EXIT_FAILURE, errno, "fdopen()");
-		new_p->print(f);
+		if (fscanf(f, "%d", &actual_result) != 1)
+			error(EXIT_FAILURE, 0, "fscanf()");
 		fclose(f);
+
+		if (actual_result != p->toplevel_value) {
+			printf("prog unexpected result: %d vs. %d\n", actual_result, p->toplevel_value);
+			exit(1);
+		}
 
 		int status;
 		while (true) {
@@ -1658,120 +1695,61 @@ int main(int argc, char *argv[])
 		}
 
 		if (WIFSIGNALED(status)) {
-			printf("cc1plus WIFSIGNALED()\n");
-			break;
+			printf("prog WIFSIGNALED\n");
+			exit(1);
 		}
 
 		if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-			printf("cc1plus WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
-			break;
+			printf("prog WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
+			exit(1);
+		}
+	}
+
+	unsigned int nr_new_bits = 0;
+	for (unsigned int i = 0; i < MAP_SIZE; ++i) {
+		if (trace_bits[i] && ++trace_bits_counters[i] == 1)
+			++nr_new_bits;
+	}
+
+	nr_bits += nr_new_bits;
+
+	printf("%u bits; %u new\n", nr_bits, nr_new_bits);
+
+	remove_shm();
+
+	return nr_new_bits > 0;
+}
+
+int main(int argc, char *argv[])
+{
+	re = std::default_random_engine(r());
+
+	// Seed the set of programs with some randomly generated ones
+	printf("Seeding initial set of test cases\n");
+	std::vector<program_ptr> programs;
+	for (unsigned int i = 0; i < 1000; ++i) {
+		printf("[%u]... ", i);
+		auto p = std::make_shared<program>(std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re));
+		for (unsigned int i = 0; i < 50; ++i) {
+			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
+			p = transformations[transformation_i](p);
 		}
 
-		// TODO
-		if (system("g++ prog.s") != 0)
-			error(EXIT_FAILURE, 0, "system()");
+		build_and_run(p);
+		programs.push_back(p);
+	}
 
-		{
-			int pipefd[2];
-			if (pipe2(pipefd, 0) == -1)
-				error(EXIT_FAILURE, errno, "pipe2()");
-
-			pid_t child = fork();
-			if (child == -1)
-				error(EXIT_FAILURE, errno, "fork()");
-
-			if (child == 0) {
-				close(pipefd[0]);
-				dup2(pipefd[1], STDOUT_FILENO);
-				close(pipefd[1]);
-
-				if (execl("./a.out", "./a.out", NULL) == -1)
-					error(EXIT_FAILURE, errno, "execl()");
-			}
-
-			int actual_result = 0;
-
-			close(pipefd[1]);
-			FILE *f = fdopen(pipefd[0], "r");
-			if (!f)
-				error(EXIT_FAILURE, errno, "fdopen()");
-			if (fscanf(f, "%d", &actual_result) != 1)
-				error(EXIT_FAILURE, 0, "fscanf()");
-			fclose(f);
-
-			if (actual_result != expected_result) {
-				printf("prog unexpected result: %d vs. %d\n", actual_result, expected_result);
-				break;
-			}
-
-			int status;
-			while (true) {
-				pid_t kid = waitpid(child, &status, 0);
-				if (kid == -1) {
-					if (errno == EINTR || errno == EAGAIN)
-						continue;
-					error(EXIT_FAILURE, errno, "waitpid()");
-				}
-
-				if (kid != child)
-					error(EXIT_FAILURE, 0, "kid != child");
-
-				if (WIFEXITED(status) || WIFSIGNALED(status))
-					break;
-			}
-
-			if (WIFSIGNALED(status)) {
-				printf("prog WIFSIGNALED\n");
-				break;
-			}
-
-			if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
-				printf("prog WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
-				break;
-			}
+	printf("Mutating test cases\n");
+	while (1) {
+		unsigned int program_i = std::uniform_int_distribution<unsigned int>(0, programs.size() - 1)(re);
+		auto p = programs[program_i];
+		for (unsigned int i = 0; i < 10; ++i) {
+			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
+			p = transformations[transformation_i](p);
 		}
 
-		static unsigned int nr_transformations = 0;
-		static unsigned int nr_bits = 0;
-		unsigned int nr_new_bits = 0;
-		for (unsigned int i = 0; i < MAP_SIZE; ++i) {
-			if (trace_bits[i] && ++trace_bits_counters[i] == 1) {
-				++nr_bits;
-				++nr_new_bits;
-			}
-		}
-
-		printf("%u transformations; %u bits; %u new; %u new per transformation\n", nr_transformations, nr_bits, nr_new_bits, nr_new_bits / nr_transformations_per_iteration);
-
-		for (unsigned int transformation_i: current_transformations)
-			transformation_counters[transformation_i] += nr_new_bits;
-
-		printf("stats:");
-		unsigned int sum = 0;
-		for (unsigned int i = 0; i < transformations.size(); ++i)
-			sum += transformation_counters[i] / 10000;
-		for (unsigned int i = 0; i < transformations.size(); ++i)
-			printf(" %u", (transformation_counters[i] / 100) / sum);
-		printf("\n");
-
-		if (nr_new_bits) {
-			p = new_p;
-			nr_failures = 0;
-		} else {
-			++nr_failures;
-		}
-
-		remove_shm();
-
-		new_p = p;
-#if 0
-		for (unsigned int i = 0; i < nr_transformations_per_iteration; ++i) {
-			auto transform = transformations[std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re)];
-			new_p = transform(new_p);
-		}
-#endif
-
-		nr_transformations += nr_transformations_per_iteration;
+		if (build_and_run(p))
+			programs[program_i] = p;
 	}
 
 	return 0;
