@@ -1,0 +1,1778 @@
+// Copyright (C) 2018  Vegard Nossum <vegard.nossum@oracle.com>
+
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <sys/time.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+
+#include <assert.h>
+#include <fcntl.h>
+#include <error.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include <algorithm>
+#include <memory>
+#include <queue>
+#include <random>
+#include <set>
+#include <sstream>
+#include <vector>
+
+// From AFL
+#include "config.h"
+
+struct scope;
+typedef std::shared_ptr<scope> scope_ptr;
+
+struct type;
+typedef std::shared_ptr<type> type_ptr;
+
+struct expression;
+typedef std::shared_ptr<expression> expr_ptr;
+typedef std::vector<expr_ptr> expr_vec;
+
+struct statement;
+typedef std::shared_ptr<statement> statement_ptr;
+
+struct function;
+typedef std::shared_ptr<function> function_ptr;
+
+struct program;
+typedef std::shared_ptr<program> program_ptr;
+
+struct visitor {
+	unsigned int unreachable_counter;
+
+	visitor():
+		unreachable_counter(0)
+	{
+	}
+
+	void enter_unreachable()
+	{
+		++unreachable_counter;
+	}
+
+	void leave_unreachable()
+	{
+		--unreachable_counter;
+	}
+
+	bool is_unreachable()
+	{
+		return unreachable_counter > 0;
+	}
+
+	virtual void visit(type_ptr &) {}
+	virtual void visit(function_ptr fn, expr_ptr &) {}
+	virtual void visit(function_ptr fn, statement_ptr &) {}
+	virtual void visit(function_ptr fn, function_ptr &) {}
+};
+
+struct type {
+	std::string name;
+
+	type(std::string name):
+		name(name)
+	{
+	}
+
+	virtual ~type()
+	{
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "%s", name.c_str());
+	}
+};
+
+static type_ptr void_type = std::make_shared<type>("void");
+static type_ptr voidp_type = std::make_shared<type>("void *");
+static type_ptr int_type = std::make_shared<type>("int");
+
+struct scope {
+	scope_ptr parent;
+};
+
+struct expression {
+	virtual expr_ptr clone(expr_ptr &this_ptr) = 0;
+
+	virtual void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+	}
+
+	virtual void print(FILE *f) = 0;
+};
+
+// Helper to maintain reachability information when traversing AST
+struct unreachable_expression: expression {
+	expr_ptr expr;
+
+	unreachable_expression(expr_ptr expr):
+		expr(expr)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<unreachable_expression>(expr->clone(expr));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.enter_unreachable();
+		v.visit(fn, this_ptr);
+		expr->visit(fn, expr, v);
+		v.leave_unreachable();
+	}
+
+	void print(FILE *f)
+	{
+		expr->print(f);
+	}
+};
+
+struct variable_expression: expression {
+	// TODO: should we have a separate class variable as well?
+	std::string name;
+
+	variable_expression(std::string name):
+		name(name)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return this_ptr;
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "%s", name.c_str());
+	}
+};
+
+struct int_literal_expression: expression {
+	int value;
+
+	int_literal_expression(int value):
+		value(value)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return this_ptr;
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "%d", value);
+	}
+};
+
+struct cast_expression: expression {
+	type_ptr type;
+	expr_ptr expr;
+
+	cast_expression(type_ptr type, expr_ptr expr):
+		type(type),
+		expr(expr)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<cast_expression>(type, expr->clone(expr));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		expr->visit(fn, expr, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "(");
+		type->print(f);
+		fprintf(f, ") (");
+		expr->print(f);
+		fprintf(f, ")");
+	}
+};
+
+struct call_expression: expression {
+	expr_ptr fn_expr;
+	std::vector<expr_ptr> arg_exprs;
+
+	call_expression(expr_ptr fn_expr, std::initializer_list<expr_ptr> arg_exprs = {}):
+		fn_expr(fn_expr),
+		arg_exprs(arg_exprs)
+	{
+	}
+
+	call_expression(expr_ptr fn_expr, std::vector<expr_ptr> arg_exprs):
+		fn_expr(fn_expr),
+		arg_exprs(arg_exprs)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		std::vector<expr_ptr> new_arg_exprs;
+		for (auto &arg_expr: arg_exprs)
+			new_arg_exprs.push_back(arg_expr->clone(arg_expr));
+
+		return std::make_shared<call_expression>(fn_expr->clone(fn_expr), new_arg_exprs);
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		fn_expr->visit(fn, fn_expr, v);
+		for (auto &arg_expr: arg_exprs)
+			arg_expr->visit(fn, arg_expr, v);
+	}
+
+	void print(FILE *f)
+	{
+		fn_expr->print(f);
+		fprintf(f, "(");
+
+		for (unsigned int i = 0; i < arg_exprs.size(); ++i) {
+			if (i > 0)
+				fprintf(f, ", ");
+
+			arg_exprs[i]->print(f);
+		}
+
+		fprintf(f, ")");
+	}
+};
+
+struct preop_expression: expression {
+	std::string op;
+	expr_ptr arg;
+
+	preop_expression(std::string op, expr_ptr arg):
+		op(op),
+		arg(arg)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<preop_expression>(op, arg->clone(arg));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		arg->visit(fn, arg, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "%s(", op.c_str());
+		arg->print(f);
+		fprintf(f, ")");
+	}
+};
+
+struct binop_expression: expression {
+	std::string op;
+	expr_ptr lhs;
+	expr_ptr rhs;
+
+	binop_expression(std::string op, expr_ptr lhs, expr_ptr rhs):
+		op(op),
+		lhs(lhs),
+		rhs(rhs)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<binop_expression>(op, lhs->clone(lhs), rhs->clone(rhs));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		lhs->visit(fn, lhs, v);
+		rhs->visit(fn, rhs, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "(");
+		lhs->print(f);
+		fprintf(f, ") %s (", op.c_str());
+		rhs->print(f);
+		fprintf(f, ")");
+	}
+};
+
+struct ternop_expression: expression {
+	std::string op1;
+	std::string op2;
+	expr_ptr arg1;
+	expr_ptr arg2;
+	expr_ptr arg3;
+
+	ternop_expression(std::string op1, std::string op2, expr_ptr arg1, expr_ptr arg2, expr_ptr arg3):
+		op1(op1),
+		op2(op2),
+		arg1(arg1),
+		arg2(arg2),
+		arg3(arg3)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<ternop_expression>(op1, op2, arg1->clone(arg1), arg2->clone(arg2), arg3->clone(arg3));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		arg1->visit(fn, arg1, v);
+		arg2->visit(fn, arg2, v);
+		arg3->visit(fn, arg3, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "(");
+		arg1->print(f);
+		fprintf(f, ") %s (", op1.c_str());
+		arg2->print(f);
+		fprintf(f, ") %s (", op2.c_str());
+		arg3->print(f);
+		fprintf(f, ")");
+	}
+};
+
+struct statement {
+	virtual statement_ptr clone(statement_ptr &this_ptr) = 0;
+
+	virtual void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+	}
+
+	virtual void print(FILE *f, unsigned int indent) = 0;
+};
+
+struct unreachable_statement: statement {
+	statement_ptr stmt;
+
+	unreachable_statement(statement_ptr stmt):
+		stmt(stmt)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		return std::make_shared<unreachable_statement>(stmt->clone(stmt));
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.enter_unreachable();
+		v.visit(fn, this_ptr);
+		stmt->visit(fn, stmt, v);
+		v.leave_unreachable();
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		stmt->print(f, indent);
+	}
+};
+
+struct declaration_statement: statement {
+	type_ptr var_type;
+	expr_ptr var_expr;
+	expr_ptr value_expr;
+
+	declaration_statement(type_ptr var_type, expr_ptr var_expr, expr_ptr value_expr):
+		var_type(var_type),
+		var_expr(var_expr),
+		value_expr(value_expr)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		return std::make_shared<declaration_statement>(var_type, var_expr->clone(var_expr), value_expr->clone(value_expr));
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		//var_type->visit(fn, var_type, v);
+		var_expr->visit(fn, var_expr, v);
+		value_expr->visit(fn, value_expr, v);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "%*s", 2 * indent, "");
+		var_type->print(f);
+		fprintf(f, " ");
+		var_expr->print(f);
+		fprintf(f, " = ");
+		value_expr->print(f);
+		fprintf(f, ";\n");
+	}
+};
+
+struct return_statement: statement {
+	expr_ptr ret_expr;
+
+	return_statement(expr_ptr ret_expr):
+		ret_expr(ret_expr)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		return std::make_shared<return_statement>(ret_expr->clone(ret_expr));
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		ret_expr->visit(fn, ret_expr, v);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "%*sreturn ", 2 * indent, "");
+		ret_expr->print(f);
+		fprintf(f, ";\n");
+	}
+};
+
+struct block_statement: statement {
+	std::vector<statement_ptr> statements;
+
+	block_statement()
+	{
+	}
+
+	explicit block_statement(std::vector<statement_ptr> &statements):
+		statements(statements)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		std::vector<statement_ptr> new_statements;
+		for (auto &stmt: statements)
+			new_statements.push_back(stmt->clone(stmt));
+
+		return std::make_shared<block_statement>(new_statements);
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		for (auto &stmt: statements)
+			stmt->visit(fn, stmt, v);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "{\n");
+		for (const auto &stmt: statements)
+			stmt->print(f, indent + 1);
+		fprintf(f, "%*s}\n", 2 * (indent - 1), "");
+	}
+};
+
+struct if_statement: statement {
+	expr_ptr cond_expr;
+	statement_ptr true_stmt;
+	statement_ptr false_stmt;
+
+	if_statement(expr_ptr cond_expr, statement_ptr true_stmt, statement_ptr false_stmt):
+		cond_expr(cond_expr),
+		true_stmt(true_stmt),
+		false_stmt(false_stmt)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		return std::make_shared<if_statement>(cond_expr->clone(cond_expr), true_stmt->clone(true_stmt), false_stmt ? false_stmt->clone(false_stmt) : false_stmt);
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		cond_expr->visit(fn, cond_expr, v);
+		true_stmt->visit(fn, true_stmt, v);
+		false_stmt->visit(fn, false_stmt, v);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "%*s", 2 * indent, "");
+		fprintf(f, "if (");
+		cond_expr->print(f);
+		fprintf(f, ") ");
+		true_stmt->print(f, indent + 1);
+
+		if (false_stmt) {
+			fprintf(f, "%*selse ", 2 * indent, "");
+			false_stmt->print(f, indent + 1);
+		}
+	}
+};
+
+struct asm_constraint_expression: expression {
+	std::string constraint;
+	expr_ptr expr;
+
+	asm_constraint_expression(std::string constraint, expr_ptr expr):
+		constraint(constraint),
+		expr(expr)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<asm_constraint_expression>(constraint, expr->clone(expr));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		expr->visit(fn, expr, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "\"%s\" (", constraint.c_str());
+		expr->print(f);
+		fprintf(f, ")");
+	}
+};
+
+struct asm_statement: statement {
+	bool is_volatile;
+	std::vector<expr_ptr> outputs;
+	std::vector<expr_ptr> inputs;
+
+	asm_statement(bool is_volatile, std::vector<expr_ptr> outputs, std::vector<expr_ptr> inputs):
+		is_volatile(is_volatile),
+		outputs(outputs),
+		inputs(inputs)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		std::vector<expr_ptr> new_outputs;
+		for (auto &output_expr: outputs)
+			new_outputs.push_back(output_expr->clone(output_expr));
+
+		std::vector<expr_ptr> new_inputs;
+		for (auto &input_expr: inputs)
+			new_inputs.push_back(input_expr->clone(input_expr));
+
+		return std::make_shared<asm_statement>(is_volatile, new_outputs, new_inputs);
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "%*s", 2 * indent, "");
+		fprintf(f, "asm %s(\"\"", is_volatile ? "volatile " : "");
+
+		if (outputs.size() || inputs.size()) {
+			fprintf(f, " : ");
+
+			for (unsigned int i = 0; i < outputs.size(); ++i) {
+				if (i > 0)
+					fprintf(f, ", ");
+
+				outputs[i]->print(f);
+			}
+		}
+
+		if (inputs.size()) {
+			fprintf(f, " : ");
+
+			for (unsigned int i = 0; i < inputs.size(); ++i) {
+				if (i > 0)
+					fprintf(f, ", ");
+
+				inputs[i]->print(f);
+			}
+		}
+
+		fprintf(f, ");\n");
+	}
+};
+
+struct statement_expression: expression {
+	statement_ptr stmt;
+
+	statement_expression(statement_ptr stmt):
+		stmt(stmt)
+	{
+	}
+
+	expr_ptr clone(expr_ptr &this_ptr)
+	{
+		return std::make_shared<statement_expression>(stmt->clone(stmt));
+	}
+
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
+	{
+		v.visit(fn, this_ptr);
+
+		stmt->visit(fn, stmt, v);
+	}
+
+	void print(FILE *f)
+	{
+		fprintf(f, "({ ");
+		stmt->print(f, 0);
+		fprintf(f, " })");
+	}
+};
+
+struct expression_statement: statement {
+	expr_ptr expr;
+
+	expression_statement(expr_ptr expr):
+		expr(expr)
+	{
+	}
+
+	statement_ptr clone(statement_ptr &this_ptr)
+	{
+		return std::make_shared<expression_statement>(expr->clone(expr));
+	}
+
+	void visit(function_ptr fn, statement_ptr &this_stmt, visitor &v)
+	{
+		v.visit(fn, this_stmt);
+
+		expr->visit(fn, expr, v);
+	}
+
+	void print(FILE *f, unsigned int indent)
+	{
+		fprintf(f, "%*s", 2 * indent, "");
+		expr->print(f);
+		fprintf(f, ";\n");
+	}
+};
+
+struct function {
+	std::string name;
+
+	type_ptr return_type;
+	std::vector<type_ptr> arg_types;
+
+	statement_ptr body;
+
+	function(std::string name, type_ptr return_type, std::vector<type_ptr> arg_types, statement_ptr body):
+		name(name),
+		return_type(return_type),
+		arg_types(arg_types),
+		body(body)
+	{
+	}
+
+	function_ptr clone()
+	{
+		return std::make_shared<function>(name, return_type, arg_types, body->clone(body));
+	}
+
+	void visit(function_ptr fn, function_ptr &this_ptr, visitor &v)
+	{
+		v.visit(this_ptr, this_ptr);
+
+		body->visit(this_ptr, body, v);
+	}
+
+	void print(FILE *f)
+	{
+		return_type->print(f);
+		fprintf(f, " %s(", name.c_str());
+		for (unsigned int i = 0; i < arg_types.size(); ++i) {
+			if (i > 0)
+				fprintf(f, ", ");
+
+			arg_types[i]->print(f);
+		}
+		fprintf(f, ")\n");
+		body->print(f, 1);
+		fprintf(f, "\n");
+	}
+};
+
+struct ident_allocator {
+	unsigned int id;
+
+	ident_allocator():
+		id(0)
+	{
+	}
+
+	std::string new_ident()
+	{
+		std::ostringstream ss;
+		ss << "id" << id++;
+		return ss.str();
+	}
+};
+
+struct program {
+	ident_allocator ids;
+
+	std::vector<statement_ptr> toplevel_decls;
+	std::vector<function_ptr> toplevel_fns;
+
+	function_ptr toplevel_fn;
+	expr_ptr toplevel_call_expr;
+
+	explicit program(int toplevel_value)
+	{
+		auto body = std::make_shared<block_statement>();
+		body->statements.push_back(std::make_shared<return_statement>(std::make_shared<int_literal_expression>(toplevel_value)));
+		toplevel_fn = std::make_shared<function>(ids.new_ident(), int_type, std::vector<type_ptr>(), body);
+		toplevel_call_expr = std::make_shared<call_expression>(std::make_shared<variable_expression>(toplevel_fn->name));
+	}
+
+	program(ident_allocator &ids, std::vector<statement_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+		ids(ids),
+		toplevel_decls(toplevel_decls),
+		toplevel_fns(toplevel_fns),
+		toplevel_fn(toplevel_fn),
+		toplevel_call_expr(toplevel_call_expr)
+	{
+	}
+
+	program_ptr clone()
+	{
+		std::vector<statement_ptr> new_toplevel_decls;
+		for (auto &stmt_ptr: toplevel_decls)
+			new_toplevel_decls.push_back(stmt_ptr->clone(stmt_ptr));
+
+		std::vector<function_ptr> new_toplevel_fns;
+		for (auto &fn_ptr: toplevel_fns)
+			new_toplevel_fns.push_back(fn_ptr->clone());
+
+		return std::make_shared<program>(ids, new_toplevel_decls, new_toplevel_fns, toplevel_fn->clone(), toplevel_call_expr->clone(toplevel_call_expr));
+	}
+
+	void visit(visitor &v)
+	{
+		for (auto &stmt_ptr: toplevel_decls)
+			stmt_ptr->visit(nullptr, stmt_ptr, v);
+
+		for (auto &fn_ptr: toplevel_fns)
+			fn_ptr->visit(nullptr, fn_ptr, v);
+
+		toplevel_fn->visit(nullptr, toplevel_fn, v);
+		// XXX? toplevel_call_expr->visit(nullptr, toplevel_call_expr, v);
+	}
+
+	void print(FILE *f)
+	{
+		//fprintf(f, "#include <stdio.h>\n");
+		fprintf(f, "extern \"C\" {\n");
+		fprintf(f, "extern int printf (const char *__restrict __format, ...);\n");
+		fprintf(f, "}\n");
+		fprintf(f, "\n");
+
+		for (auto &stmt_ptr: toplevel_decls)
+			stmt_ptr->print(f, 0);
+
+		for (auto &fn_ptr: toplevel_fns)
+			fn_ptr->print(f);
+
+		toplevel_fn->print(f);
+
+		fprintf(f, "int main(int argc, char *argv[])\n");
+		fprintf(f, "{\n");
+		fprintf(f, "  printf(\"%%d\\n\", ");
+		toplevel_call_expr->print(f);
+		fprintf(f, ");\n");
+		fprintf(f, "}\n");
+	}
+};
+
+// Mutation
+
+static std::random_device r;
+static std::default_random_engine re;
+
+// Tree traversal helpers
+
+template<typename T>
+struct find_result {
+	function_ptr fn;
+	expr_ptr &expr_ptr_ref;
+	std::shared_ptr<T> expr;
+
+	find_result(function_ptr fn, expr_ptr &expr_ptr_ref, std::shared_ptr<T> expr):
+		fn(fn),
+		expr_ptr_ref(expr_ptr_ref),
+		expr(expr)
+	{
+	}
+
+#if 0
+	find_result<T> &operator=(find_result<T> &&other)
+	{
+		
+	}
+#endif
+};
+
+template<typename T>
+std::vector<find_result<T>> find_exprs(program_ptr p)
+{
+	std::vector<find_result<T>> result;
+
+	struct find_exprs_visitor: visitor {
+		std::vector<find_result<T>> &result;
+
+		find_exprs_visitor(std::vector<find_result<T>> &result):
+			result(result)
+		{
+		}
+
+		void visit(function_ptr fn, expr_ptr &e)
+		{
+			// Only return expressions within functions
+			if (!fn)
+				return;
+
+			auto cast_e = std::dynamic_pointer_cast<T>(e);
+			if (cast_e)
+				result.push_back(find_result<T>(fn, e, cast_e));
+		}
+	};
+
+	find_exprs_visitor v(result);
+	p->visit(v);
+	return result;
+}
+
+template<typename T>
+struct find_stmts_result {
+	function_ptr fn;
+	statement_ptr &stmt_ptr_ref;
+	std::shared_ptr<T> stmt;
+
+	find_stmts_result(function_ptr fn, statement_ptr &stmt_ptr_ref, std::shared_ptr<T> stmt):
+		fn(fn),
+		stmt_ptr_ref(stmt_ptr_ref),
+		stmt(stmt)
+	{
+	}
+};
+
+template<typename T>
+std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(visitor &)> filter = [](visitor &){ return true; })
+{
+	std::vector<find_stmts_result<T>> result;
+
+	struct find_stmts_visitor: visitor {
+		std::function<bool(visitor &)> filter;
+		std::vector<find_stmts_result<T>> &result;
+
+		find_stmts_visitor(std::function<bool(visitor &)> filter, std::vector<find_stmts_result<T>> &result):
+			filter(filter),
+			result(result)
+		{
+		}
+
+		void visit(function_ptr fn, statement_ptr &s)
+		{
+			if (!filter(*this))
+				return;
+
+			auto cast_s = std::dynamic_pointer_cast<T>(s);
+			if (cast_s)
+				result.push_back(find_stmts_result<T>(fn, s, cast_s));
+		}
+	};
+
+	find_stmts_visitor v(filter, result);
+	p->visit(v);
+	return result;
+}
+
+// Integer transformations
+
+static program_ptr transform_integer_to_statement_expression(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	auto new_e = std::make_shared<statement_expression>(std::make_shared<expression_statement>(int_e));
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_sum(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Pick numbers that we know won't overflow (either here or in the generated program!)
+	int min = std::numeric_limits<int>::min();
+	int max = std::numeric_limits<int>::max();
+	if (int_e->value < 0)
+		max = int_e->value - min;
+	else
+		min = int_e->value - max;
+
+	int value_a = std::uniform_int_distribution<int>(min, max)(re);
+	int value_b = int_e->value - value_a;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(value_b);
+	auto new_e = std::make_shared<binop_expression>("+", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static int gcd(int a, int b)
+{
+	while (a != b) {
+		if (a > b)
+			a -= b;
+		else
+			b -= a;
+	}
+
+	return a;
+}
+
+static program_ptr transform_integer_to_product(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// TODO!
+	int a = abs(int_e->value);
+	if (a <= 1)
+		return p;
+	int b = std::uniform_int_distribution<int>(1, a - 1)(re);
+
+	int value_a = gcd(a, b);
+	int value_b = int_e->value / value_a;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(value_b);
+	auto new_e = std::make_shared<binop_expression>("*", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_negation(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	auto arg_expr = std::make_shared<int_literal_expression>(~int_e->value);
+	auto new_e = std::make_shared<preop_expression>("~", arg_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_conjunction(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Pick numbers that we know won't overflow (either here or in the generated program!)
+	int value_a = int_e->value | r;
+	int value_b = int_e->value | ~r;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(value_b);
+	auto new_e = std::make_shared<binop_expression>("&", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_disjunction(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Pick numbers that we know won't overflow (either here or in the generated program!)
+	int value_a = int_e->value & r;
+	int value_b = int_e->value & ~r;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(value_b);
+	auto new_e = std::make_shared<binop_expression>("|", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_xor(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Pick numbers that we know won't overflow (either here or in the generated program!)
+	int value_a = ~r;
+	int value_b = r ^ ~int_e->value;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(value_b);
+	auto new_e = std::make_shared<binop_expression>("^", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_1_to_equals(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto _int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	decltype(_int_literal_exprs) int_literal_exprs;
+	for (auto x: _int_literal_exprs) {
+		if (x.expr->value == 1)
+			int_literal_exprs.push_back(x);
+	}
+
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(r);
+	auto b_expr = std::make_shared<int_literal_expression>(r);
+	auto new_e = std::make_shared<binop_expression>("==", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_1_to_not_equals(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto _int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	decltype(_int_literal_exprs) int_literal_exprs;
+	for (auto x: _int_literal_exprs) {
+		if (x.expr->value == 1)
+			int_literal_exprs.push_back(x);
+	}
+
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Pick two random numbers (not the same)
+	int r1 = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+	int r2;
+	do {
+		r2 = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+	} while (r2 == r1);
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(r1);
+	auto b_expr = std::make_shared<int_literal_expression>(r2);
+	auto new_e = std::make_shared<binop_expression>("!=", a_expr, b_expr);
+	e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_variable(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	auto body = std::dynamic_pointer_cast<block_statement>(e.fn->body);
+	body->statements.insert(body->statements.begin() + 0, new_decl);
+	e.expr_ptr_ref = new_var;
+	return new_p;
+}
+
+// TODO: by creating global declarations we get a problem with later transformations
+static program_ptr transform_integer_to_global_variable(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals (within a function)
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	new_p->toplevel_decls.insert(new_p->toplevel_decls.begin() + 0, new_decl);
+	e.expr_ptr_ref = new_var;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_function(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals (within a function)
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Create new function
+	auto new_body = std::make_shared<block_statement>();
+	new_body->statements.push_back(std::make_shared<return_statement>(int_e));
+	auto new_fn = std::make_shared<function>(new_p->ids.new_ident(), int_type, std::vector<type_ptr>(), new_body);
+	new_p->toplevel_fns.insert(new_p->toplevel_fns.begin() + 0, new_fn);
+
+	// Replace by a new expression
+	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>(new_fn->name));
+	e.expr_ptr_ref = new_call;
+	return new_p;
+}
+
+static program_ptr transform_integer_to_builtin_constant_p(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	std::vector<expr_ptr> args;
+	args.push_back(std::make_shared<int_literal_expression>(int_e->value));
+	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_constant_p"), args);
+	auto a_expr = std::make_shared<int_literal_expression>(int_e->value);
+	auto b_expr = std::make_shared<int_literal_expression>(int_e->value);
+	auto new_ternop = std::make_shared<ternop_expression>("?", ":", new_call, a_expr, b_expr);
+	e.expr_ptr_ref = new_ternop;
+	return new_p;
+}
+
+static program_ptr transform_insert_builtin_expect(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	int value;
+	if (std::uniform_int_distribution<int>(0, 3)(re) == 0)
+		value = int_e->value;
+	else
+		value = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Replace by a new expression
+	std::vector<expr_ptr> args;
+	args.push_back(std::make_shared<int_literal_expression>(int_e->value));
+	args.push_back(std::make_shared<int_literal_expression>(value));
+	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_expect"), args);
+	e.expr_ptr_ref = new_call;
+	return new_p;
+}
+
+static program_ptr transform_insert_builtin_prefetch(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all block statements
+	auto block_stmts = find_stmts<block_statement>(new_p);
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	int value = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+
+	// Replace by a new expression
+	std::vector<expr_ptr> args;
+	args.push_back(std::make_shared<cast_expression>(voidp_type, std::make_shared<int_literal_expression>(value)));
+	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_prefetch"), args));
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+static program_ptr transform_insert_if(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all block statements
+	auto block_stmts = find_stmts<block_statement>(new_p);
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	auto cond_expr = std::make_shared<int_literal_expression>(std::uniform_int_distribution<int>(0, 1)(re));
+	statement_ptr true_stmt = std::make_shared<block_statement>();
+	statement_ptr false_stmt = std::make_shared<block_statement>();
+
+	if (cond_expr->value)
+		false_stmt = std::make_shared<unreachable_statement>(false_stmt);
+	else
+		true_stmt = std::make_shared<unreachable_statement>(true_stmt);
+
+	auto new_stmt = std::make_shared<if_statement>(cond_expr, true_stmt, false_stmt);
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+static program_ptr transform_insert_asm(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all block statements
+	auto block_stmts = find_stmts<block_statement>(new_p);
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	auto new_stmt = std::make_shared<asm_statement>(std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>(), std::vector<expr_ptr>());
+	auto body = std::dynamic_pointer_cast<block_statement>(new_p->toplevel_fn->body);
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+#if 0
+static program_ptr transform_insert_asm_2(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all block statements
+	auto block_stmts = find_stmts<block_statement>(new_p);
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	auto constraint_expr = std::make_shared<asm_constraint_expression>("+r", );
+	auto new_stmt = std::make_shared<asm_statement>(std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>{constraint_expr}, std::vector<expr_ptr>());
+	auto body = std::dynamic_pointer_cast<block_statement>(new_p->toplevel_fn->body);
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+#endif
+
+static program_ptr transform_insert_builtin_unreachable(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all unreachable block statements
+	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	// Replace by a new expression
+	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_unreachable"), std::vector<expr_ptr>()));
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+static program_ptr transform_insert_builtin_trap(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all unreachable block statements
+	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	// Replace by a new expression
+	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_trap"), std::vector<expr_ptr>()));
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+static program_ptr transform_insert_div_by_0(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all unreachable block statements
+	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	if (block_stmts.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
+	auto block_stmt = stmt.stmt;
+
+	// Replace by a new expression
+	auto a_expr = std::make_shared<int_literal_expression>(1);
+	auto b_expr = std::make_shared<int_literal_expression>(0);
+	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<binop_expression>("/", a_expr, b_expr));
+	auto &statements = block_stmt->statements;
+	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
+	return new_p;
+}
+
+static program_ptr transform_integer_to_variable_and_asm(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.expr;
+
+	// Replace by a new expression
+	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	auto body = std::dynamic_pointer_cast<block_statement>(e.fn->body);
+	body->statements.insert(body->statements.begin() + 0, new_decl);
+
+	auto constraint_expr = std::make_shared<asm_constraint_expression>("+r", std::make_shared<variable_expression>(new_var->name));
+	auto new_stmt = std::make_shared<asm_statement>(std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>{constraint_expr}, std::vector<expr_ptr>());
+	body->statements.insert(body->statements.begin() + 1, new_stmt);
+	e.expr_ptr_ref = new_var;
+	return new_p;
+}
+
+// List of transformations
+
+typedef program_ptr (*transformation)(program_ptr);
+
+static const std::vector<transformation> transformations = {
+	&transform_integer_to_statement_expression,
+	&transform_integer_to_sum,
+	&transform_integer_to_product,
+	&transform_integer_to_negation,
+	&transform_integer_to_conjunction,
+	&transform_integer_to_disjunction,
+	&transform_integer_to_xor,
+	&transform_integer_1_to_equals,
+	&transform_integer_1_to_not_equals,
+	&transform_integer_to_variable,
+	&transform_integer_to_global_variable,
+	&transform_integer_to_function,
+	&transform_integer_to_builtin_constant_p,
+	&transform_insert_builtin_expect,
+	&transform_insert_builtin_prefetch,
+	&transform_insert_if,
+	&transform_insert_asm,
+	&transform_insert_builtin_unreachable,
+	&transform_insert_builtin_trap,
+	&transform_insert_div_by_0,
+	&transform_integer_to_variable_and_asm,
+};
+
+// From AFL
+int shm_id;
+uint8_t *trace_bits;
+
+// From AFL
+static void remove_shm(void)
+{
+	if (shmctl(shm_id, IPC_RMID, NULL) == -1)
+		error(EXIT_FAILURE, errno, "shmctl(IPC_RMID)");
+	if (shmdt(trace_bits) == -1)
+		error(EXIT_FAILURE, errno, "shmdt()");
+}
+
+// From AFL
+static void setup_shm(void)
+{
+	shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+	if (shm_id < 0)
+		error(EXIT_FAILURE, errno, "shmget()");
+
+	//atexit(remove_shm);
+
+	char *shm_str;
+	if (asprintf(&shm_str, "%d", shm_id) == -1)
+		error(EXIT_FAILURE, errno, "asprintf()");
+	setenv(SHM_ENV_VAR, shm_str, 1);
+	free(shm_str);
+
+	trace_bits = (uint8_t *) shmat(shm_id, NULL, 0);
+	if (!trace_bits)
+		error(EXIT_FAILURE, errno, "shmat()");
+}
+
+// Main
+
+/*
+ * One of the most difficult things to get right is how many transformations
+ * to apply before attempting to recompile a program. The problem is that
+ * large files take a long time to compile, but if we apply few transformations
+ * then we're most likely wasting time because we won't find any new coverage.
+ *
+ * What we should do is:
+ *  - first try to collect coverage for some ~1000 small files with ~50 transformations each (~32 lines of code)
+ *  - then try to extend the small test-cases one by one by applying a smaller number of transformations (?)
+ */
+
+static const unsigned int nr_transformations_per_iteration = 200;
+
+unsigned int trace_bits_counters[MAP_SIZE] = {};
+
+int main(int argc, char *argv[])
+{
+	re = std::default_random_engine(r());
+
+	int expected_result = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
+	auto p = std::make_shared<program>(expected_result);
+	auto new_p = p;
+#if 0
+	for (unsigned int i = 0; i < 300; ++i) {
+		auto transform = transformations[std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re)];
+		new_p = transform(new_p);
+	}
+#endif
+
+	unsigned int nr_failures = 0;
+
+	unsigned int transformation_counters[transformations.size()] = {};
+
+	while (1) {
+		auto p = std::make_shared<program>(expected_result);
+		auto new_p = p;
+
+		std::vector<unsigned int> current_transformations;
+		for (unsigned int i = 0; i < 50; ++i) {
+			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
+			current_transformations.push_back(transformation_i);
+
+			auto transform = transformations[transformation_i];
+			new_p = transform(new_p);
+		}
+
+		FILE *fcurr = fopen("/tmp/current.cc", "w+");
+		if (!fcurr)
+			error(EXIT_FAILURE, errno, "fopen()");
+		new_p->print(fcurr);
+		fclose(fcurr);
+
+		int pipefd[2];
+		if (pipe2(pipefd, 0) == -1)
+			error(EXIT_FAILURE, errno, "pipe2()");
+
+		setup_shm();
+
+		pid_t child = fork();
+		if (child == -1)
+			error(EXIT_FAILURE, errno, "fork()");
+
+		if (child == 0) {
+			close(pipefd[1]);
+			dup2(pipefd[0], STDIN_FILENO);
+			close(pipefd[0]);
+
+			if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-O3", "-Wno-div-by-zero", "-Wno-unused-value", "-Wno-int-to-pointer-cast", "-std=c++14", "-fpermissive", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
+			//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-Wall", "-std=c++14", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
+				error(EXIT_FAILURE, errno, "execvp()");
+		}
+
+		close(pipefd[0]);
+		FILE *f = fdopen(pipefd[1], "w");
+		if (!f)
+			error(EXIT_FAILURE, errno, "fdopen()");
+		new_p->print(f);
+		fclose(f);
+
+		int status;
+		while (true) {
+			pid_t kid = waitpid(child, &status, 0);
+			if (kid == -1) {
+				if (errno == EINTR || errno == EAGAIN)
+					continue;
+				error(EXIT_FAILURE, errno, "waitpid()");
+			}
+
+			if (kid != child)
+				error(EXIT_FAILURE, 0, "kid != child");
+
+			if (WIFEXITED(status) || WIFSIGNALED(status))
+				break;
+		}
+
+		if (WIFSIGNALED(status)) {
+			printf("cc1plus WIFSIGNALED()\n");
+			break;
+		}
+
+		if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+			printf("cc1plus WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
+			break;
+		}
+
+		// TODO
+		if (system("g++ prog.s") != 0)
+			error(EXIT_FAILURE, 0, "system()");
+
+		{
+			int pipefd[2];
+			if (pipe2(pipefd, 0) == -1)
+				error(EXIT_FAILURE, errno, "pipe2()");
+
+			pid_t child = fork();
+			if (child == -1)
+				error(EXIT_FAILURE, errno, "fork()");
+
+			if (child == 0) {
+				close(pipefd[0]);
+				dup2(pipefd[1], STDOUT_FILENO);
+				close(pipefd[1]);
+
+				if (execl("./a.out", "./a.out", NULL) == -1)
+					error(EXIT_FAILURE, errno, "execl()");
+			}
+
+			int actual_result = 0;
+
+			close(pipefd[1]);
+			FILE *f = fdopen(pipefd[0], "r");
+			if (!f)
+				error(EXIT_FAILURE, errno, "fdopen()");
+			if (fscanf(f, "%d", &actual_result) != 1)
+				error(EXIT_FAILURE, 0, "fscanf()");
+			fclose(f);
+
+			if (actual_result != expected_result) {
+				printf("prog unexpected result: %d vs. %d\n", actual_result, expected_result);
+				break;
+			}
+
+			int status;
+			while (true) {
+				pid_t kid = waitpid(child, &status, 0);
+				if (kid == -1) {
+					if (errno == EINTR || errno == EAGAIN)
+						continue;
+					error(EXIT_FAILURE, errno, "waitpid()");
+				}
+
+				if (kid != child)
+					error(EXIT_FAILURE, 0, "kid != child");
+
+				if (WIFEXITED(status) || WIFSIGNALED(status))
+					break;
+			}
+
+			if (WIFSIGNALED(status)) {
+				printf("prog WIFSIGNALED\n");
+				break;
+			}
+
+			if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
+				printf("prog WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
+				break;
+			}
+		}
+
+		static unsigned int nr_transformations = 0;
+		static unsigned int nr_bits = 0;
+		unsigned int nr_new_bits = 0;
+		for (unsigned int i = 0; i < MAP_SIZE; ++i) {
+			if (trace_bits[i] && ++trace_bits_counters[i] == 1) {
+				++nr_bits;
+				++nr_new_bits;
+			}
+		}
+
+		printf("%u transformations; %u bits; %u new; %u new per transformation\n", nr_transformations, nr_bits, nr_new_bits, nr_new_bits / nr_transformations_per_iteration);
+
+		for (unsigned int transformation_i: current_transformations)
+			transformation_counters[transformation_i] += nr_new_bits;
+
+		printf("stats:");
+		unsigned int sum = 0;
+		for (unsigned int i = 0; i < transformations.size(); ++i)
+			sum += transformation_counters[i] / 10000;
+		for (unsigned int i = 0; i < transformations.size(); ++i)
+			printf(" %u", (transformation_counters[i] / 100) / sum);
+		printf("\n");
+
+		if (nr_new_bits) {
+			p = new_p;
+			nr_failures = 0;
+		} else {
+			++nr_failures;
+		}
+
+		remove_shm();
+
+		new_p = p;
+#if 0
+		for (unsigned int i = 0; i < nr_transformations_per_iteration; ++i) {
+			auto transform = transformations[std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re)];
+			new_p = transform(new_p);
+		}
+#endif
+
+		nr_transformations += nr_transformations_per_iteration;
+	}
+
+	return 0;
+}
