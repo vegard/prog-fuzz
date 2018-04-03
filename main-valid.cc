@@ -955,15 +955,15 @@ struct find_stmts_result {
 
 // TODO: merge this with find_expr() above...
 template<typename T>
-std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(visitor &)> filter = [](visitor &){ return true; })
+std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(visitor &, std::shared_ptr<T>)> filter = [](visitor &, std::shared_ptr<T> e){ return true; })
 {
 	std::vector<find_stmts_result<T>> result;
 
 	struct find_stmts_visitor: visitor {
-		std::function<bool(visitor &)> filter;
+		std::function<bool(visitor &, std::shared_ptr<T>)> filter;
 		std::vector<find_stmts_result<T>> &result;
 
-		find_stmts_visitor(std::function<bool(visitor &)> filter, std::vector<find_stmts_result<T>> &result):
+		find_stmts_visitor(std::function<bool(visitor &, std::shared_ptr<T>)> filter, std::vector<find_stmts_result<T>> &result):
 			filter(filter),
 			result(result)
 		{
@@ -971,12 +971,13 @@ std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(v
 
 		void visit(function_ptr fn, expr_ptr &s)
 		{
-			if (!filter(*this))
-				return;
-
 			auto cast_s = std::dynamic_pointer_cast<T>(s);
-			if (cast_s)
+			if (cast_s) {
+				if (!filter(*this, cast_s))
+					return;
+
 				result.push_back(find_stmts_result<T>(fn, s, cast_s));
+			}
 		}
 	};
 
@@ -986,7 +987,7 @@ std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(v
 }
 
 template<typename T>
-std::vector<find_stmts_result<T>> find_stmt(program_ptr p, std::function<bool(visitor &)> filter = [](visitor &){ return true; })
+std::vector<find_stmts_result<T>> find_stmt(program_ptr p, std::function<bool(visitor &, std::shared_ptr<T>)> filter = [](visitor &, std::shared_ptr<T> e){ return true; })
 {
 	auto results = find_stmts<T>(p, filter);
 	if (results.empty())
@@ -1232,19 +1233,13 @@ static program_ptr transform_integer_to_xor(program_ptr p)
 	return new_p;
 }
 
-static program_ptr transform_integer_1_to_equals(program_ptr p)
+static program_ptr transform_integer_to_ternary(program_ptr p)
 {
 	program_ptr new_p = p->clone();
 	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto _int_literal_exprs = find_expr<int_literal_expression>(new_p);
-	decltype(_int_literal_exprs) int_literal_exprs;
-	for (auto x: _int_literal_exprs) {
-		if (x.expr->value == 1)
-			int_literal_exprs.push_back(x);
-	}
-
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1252,13 +1247,46 @@ static program_ptr transform_integer_1_to_equals(program_ptr p)
 	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
 	auto int_e = e.expr;
 
+	int min = std::numeric_limits<int>::min();
+	int max = std::numeric_limits<int>::max();
+
+	auto cond_expr = std::make_shared<int_literal_expression>(generation, std::uniform_int_distribution<int>(0, 1)(re));
+	expr_ptr true_expr = std::make_shared<int_literal_expression>(generation, int_e->value);
+	expr_ptr false_expr = std::make_shared<unreachable_statement>(generation,
+		std::make_shared<int_literal_expression>(generation, std::uniform_int_distribution<int>(min, max)(re)));
+
+	expr_ptr a_expr = true_expr;
+	expr_ptr b_expr = false_expr;
+	if (!cond_expr->value)
+		std::swap(a_expr, b_expr);
+
+	// Replace by a new expression
+	auto new_e = std::make_shared<ternop_expression>(generation, "?", ":", cond_expr, a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
+	return new_p;
+}
+
+static program_ptr transform_integer_1_to_equals(program_ptr p)
+{
+	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
+
+	// First, find all integer literals
+	auto int_literal_exprs = find_stmt<int_literal_expression>(new_p, [](visitor &, std::shared_ptr<int_literal_expression> e){ return e->value == 1; });
+	if (int_literal_exprs.empty())
+		return p;
+
+	// Pick a random one to mutate
+	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
+	auto int_e = e.stmt;
+
 	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
 
 	// Replace by a new expression
 	auto a_expr = std::make_shared<int_literal_expression>(generation, r);
 	auto b_expr = std::make_shared<int_literal_expression>(generation, r);
 	auto new_e = std::make_shared<binop_expression>(generation, "==", a_expr, b_expr);
-	*e.expr_ptr_ref = new_e;
+	*e.stmt_ptr_ref = new_e;
 	return new_p;
 }
 
@@ -1268,19 +1296,13 @@ static program_ptr transform_integer_1_to_not_equals(program_ptr p)
 	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto _int_literal_exprs = find_expr<int_literal_expression>(new_p);
-	decltype(_int_literal_exprs) int_literal_exprs;
-	for (auto x: _int_literal_exprs) {
-		if (x.expr->value == 1)
-			int_literal_exprs.push_back(x);
-	}
-
+	auto int_literal_exprs = find_stmt<int_literal_expression>(new_p, [](visitor &, std::shared_ptr<int_literal_expression> e){ return e->value == 1; });
 	if (int_literal_exprs.empty())
 		return p;
 
 	// Pick a random one to mutate
 	auto e = int_literal_exprs[std::uniform_int_distribution<unsigned int>(0, int_literal_exprs.size() - 1)(re)];
-	auto int_e = e.expr;
+	auto int_e = e.stmt;
 
 	// Pick two random numbers (not the same)
 	int r1 = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
@@ -1293,7 +1315,7 @@ static program_ptr transform_integer_1_to_not_equals(program_ptr p)
 	auto a_expr = std::make_shared<int_literal_expression>(generation, r1);
 	auto b_expr = std::make_shared<int_literal_expression>(generation, r2);
 	auto new_e = std::make_shared<binop_expression>(generation, "!=", a_expr, b_expr);
-	*e.expr_ptr_ref = new_e;
+	*e.stmt_ptr_ref = new_e;
 	return new_p;
 }
 
@@ -1534,7 +1556,7 @@ static program_ptr transform_insert_builtin_unreachable(program_ptr p)
 	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v, std::shared_ptr<block_statement>) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1557,7 +1579,7 @@ static program_ptr transform_insert_builtin_trap(program_ptr p)
 	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v, std::shared_ptr<block_statement>) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1580,7 +1602,7 @@ static program_ptr transform_insert_div_by_0(program_ptr p)
 	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v, std::shared_ptr<block_statement>) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1638,6 +1660,7 @@ static const std::vector<transformation> transformations = {
 	&transform_integer_to_conjunction,
 	&transform_integer_to_disjunction,
 	&transform_integer_to_xor,
+	&transform_integer_to_ternary,
 	&transform_integer_1_to_equals,
 	&transform_integer_1_to_not_equals,
 	&transform_integer_to_variable,
