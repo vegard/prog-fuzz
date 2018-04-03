@@ -26,9 +26,6 @@
 // From AFL
 #include "config.h"
 
-struct scope;
-typedef std::shared_ptr<scope> scope_ptr;
-
 struct type;
 typedef std::shared_ptr<type> type_ptr;
 
@@ -95,10 +92,6 @@ struct type {
 static type_ptr void_type = std::make_shared<type>("void");
 static type_ptr voidp_type = std::make_shared<type>("void *");
 static type_ptr int_type = std::make_shared<type>("int");
-
-struct scope {
-	scope_ptr parent;
-};
 
 struct expression {
 	virtual expr_ptr clone(expr_ptr &this_ptr) = 0;
