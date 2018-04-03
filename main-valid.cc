@@ -33,9 +33,6 @@ struct expression;
 typedef std::shared_ptr<expression> expr_ptr;
 typedef std::vector<expr_ptr> expr_vec;
 
-struct statement;
-typedef std::shared_ptr<statement> statement_ptr;
-
 struct function;
 typedef std::shared_ptr<function> function_ptr;
 
@@ -67,7 +64,6 @@ struct visitor {
 
 	virtual void visit(type_ptr &) {}
 	virtual void visit(function_ptr fn, expr_ptr &) {}
-	virtual void visit(function_ptr fn, statement_ptr &) {}
 	virtual void visit(function_ptr fn, function_ptr &) {}
 };
 
@@ -101,7 +97,7 @@ struct expression {
 		v.visit(fn, this_ptr);
 	}
 
-	virtual void print(FILE *f) = 0;
+	virtual void print(FILE *f, unsigned int indent) = 0;
 };
 
 // Helper to maintain reachability information when traversing AST
@@ -126,9 +122,9 @@ struct unreachable_expression: expression {
 		v.leave_unreachable();
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
-		expr->print(f);
+		expr->print(f, indent);
 	}
 };
 
@@ -146,7 +142,7 @@ struct variable_expression: expression {
 		return this_ptr;
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "%s", name.c_str());
 	}
@@ -165,7 +161,7 @@ struct int_literal_expression: expression {
 		return this_ptr;
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "%d", value);
 	}
@@ -193,12 +189,12 @@ struct cast_expression: expression {
 		expr->visit(fn, expr, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "(");
 		type->print(f);
 		fprintf(f, ") (");
-		expr->print(f);
+		expr->print(f, indent);
 		fprintf(f, ")");
 	}
 };
@@ -237,16 +233,16 @@ struct call_expression: expression {
 			arg_expr->visit(fn, arg_expr, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
-		fn_expr->print(f);
+		fn_expr->print(f, indent);
 		fprintf(f, "(");
 
 		for (unsigned int i = 0; i < arg_exprs.size(); ++i) {
 			if (i > 0)
 				fprintf(f, ", ");
 
-			arg_exprs[i]->print(f);
+			arg_exprs[i]->print(f, indent);
 		}
 
 		fprintf(f, ")");
@@ -275,10 +271,10 @@ struct preop_expression: expression {
 		arg->visit(fn, arg, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "%s(", op.c_str());
-		arg->print(f);
+		arg->print(f, indent);
 		fprintf(f, ")");
 	}
 };
@@ -308,12 +304,12 @@ struct binop_expression: expression {
 		rhs->visit(fn, rhs, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "(");
-		lhs->print(f);
+		lhs->print(f, indent);
 		fprintf(f, ") %s (", op.c_str());
-		rhs->print(f);
+		rhs->print(f, indent);
 		fprintf(f, ")");
 	}
 };
@@ -348,43 +344,32 @@ struct ternop_expression: expression {
 		arg3->visit(fn, arg3, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "(");
-		arg1->print(f);
+		arg1->print(f, indent);
 		fprintf(f, ") %s (", op1.c_str());
-		arg2->print(f);
+		arg2->print(f, indent);
 		fprintf(f, ") %s (", op2.c_str());
-		arg3->print(f);
+		arg3->print(f, indent);
 		fprintf(f, ")");
 	}
 };
 
-struct statement {
-	virtual statement_ptr clone(statement_ptr &this_ptr) = 0;
+struct unreachable_statement: expression {
+	expr_ptr stmt;
 
-	virtual void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
-	{
-		v.visit(fn, this_ptr);
-	}
-
-	virtual void print(FILE *f, unsigned int indent) = 0;
-};
-
-struct unreachable_statement: statement {
-	statement_ptr stmt;
-
-	unreachable_statement(statement_ptr stmt):
+	unreachable_statement(expr_ptr stmt):
 		stmt(stmt)
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		return std::make_shared<unreachable_statement>(stmt->clone(stmt));
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.enter_unreachable();
 		v.visit(fn, this_ptr);
@@ -398,6 +383,8 @@ struct unreachable_statement: statement {
 	}
 };
 
+typedef expression statement;
+
 struct declaration_statement: statement {
 	type_ptr var_type;
 	expr_ptr var_expr;
@@ -410,12 +397,12 @@ struct declaration_statement: statement {
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		return std::make_shared<declaration_statement>(var_type, var_expr->clone(var_expr), value_expr->clone(value_expr));
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 
@@ -429,9 +416,9 @@ struct declaration_statement: statement {
 		fprintf(f, "%*s", 2 * indent, "");
 		var_type->print(f);
 		fprintf(f, " ");
-		var_expr->print(f);
+		var_expr->print(f, indent);
 		fprintf(f, " = ");
-		value_expr->print(f);
+		value_expr->print(f, indent);
 		fprintf(f, ";\n");
 	}
 };
@@ -444,12 +431,12 @@ struct return_statement: statement {
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		return std::make_shared<return_statement>(ret_expr->clone(ret_expr));
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 
@@ -459,33 +446,33 @@ struct return_statement: statement {
 	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "%*sreturn ", 2 * indent, "");
-		ret_expr->print(f);
+		ret_expr->print(f, indent);
 		fprintf(f, ";\n");
 	}
 };
 
 struct block_statement: statement {
-	std::vector<statement_ptr> statements;
+	std::vector<expr_ptr> statements;
 
 	block_statement()
 	{
 	}
 
-	explicit block_statement(std::vector<statement_ptr> &statements):
+	explicit block_statement(std::vector<expr_ptr> &statements):
 		statements(statements)
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		std::vector<statement_ptr> new_statements;
+		std::vector<expr_ptr> new_statements;
 		for (auto &stmt: statements)
 			new_statements.push_back(stmt->clone(stmt));
 
 		return std::make_shared<block_statement>(new_statements);
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 
@@ -504,22 +491,22 @@ struct block_statement: statement {
 
 struct if_statement: statement {
 	expr_ptr cond_expr;
-	statement_ptr true_stmt;
-	statement_ptr false_stmt;
+	expr_ptr true_stmt;
+	expr_ptr false_stmt;
 
-	if_statement(expr_ptr cond_expr, statement_ptr true_stmt, statement_ptr false_stmt):
+	if_statement(expr_ptr cond_expr, expr_ptr true_stmt, expr_ptr false_stmt):
 		cond_expr(cond_expr),
 		true_stmt(true_stmt),
 		false_stmt(false_stmt)
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		return std::make_shared<if_statement>(cond_expr->clone(cond_expr), true_stmt->clone(true_stmt), false_stmt ? false_stmt->clone(false_stmt) : false_stmt);
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 
@@ -532,7 +519,7 @@ struct if_statement: statement {
 	{
 		fprintf(f, "%*s", 2 * indent, "");
 		fprintf(f, "if (");
-		cond_expr->print(f);
+		cond_expr->print(f, indent);
 		fprintf(f, ") ");
 		true_stmt->print(f, indent + 1);
 
@@ -565,10 +552,10 @@ struct asm_constraint_expression: expression {
 		expr->visit(fn, expr, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "\"%s\" (", constraint.c_str());
-		expr->print(f);
+		expr->print(f, indent);
 		fprintf(f, ")");
 	}
 };
@@ -585,7 +572,7 @@ struct asm_statement: statement {
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		std::vector<expr_ptr> new_outputs;
 		for (auto &output_expr: outputs)
@@ -598,7 +585,7 @@ struct asm_statement: statement {
 		return std::make_shared<asm_statement>(is_volatile, new_outputs, new_inputs);
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_ptr, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 	}
@@ -615,7 +602,7 @@ struct asm_statement: statement {
 				if (i > 0)
 					fprintf(f, ", ");
 
-				outputs[i]->print(f);
+				outputs[i]->print(f, indent);
 			}
 		}
 
@@ -626,7 +613,7 @@ struct asm_statement: statement {
 				if (i > 0)
 					fprintf(f, ", ");
 
-				inputs[i]->print(f);
+				inputs[i]->print(f, indent);
 			}
 		}
 
@@ -635,10 +622,10 @@ struct asm_statement: statement {
 };
 
 struct statement_expression: expression {
-	statement_ptr block_stmt;
-	statement_ptr last_stmt;
+	expr_ptr block_stmt;
+	expr_ptr last_stmt;
 
-	statement_expression(statement_ptr block_stmt, statement_ptr last_stmt):
+	statement_expression(expr_ptr block_stmt, expr_ptr last_stmt):
 		block_stmt(block_stmt),
 		last_stmt(last_stmt)
 	{
@@ -657,7 +644,7 @@ struct statement_expression: expression {
 		last_stmt->visit(fn, last_stmt, v);
 	}
 
-	void print(FILE *f)
+	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "({ ");
 		block_stmt->print(f, 0);
@@ -674,12 +661,12 @@ struct expression_statement: statement {
 	{
 	}
 
-	statement_ptr clone(statement_ptr &this_ptr)
+	expr_ptr clone(expr_ptr &this_ptr)
 	{
 		return std::make_shared<expression_statement>(expr->clone(expr));
 	}
 
-	void visit(function_ptr fn, statement_ptr &this_stmt, visitor &v)
+	void visit(function_ptr fn, expr_ptr &this_stmt, visitor &v)
 	{
 		v.visit(fn, this_stmt);
 
@@ -689,7 +676,7 @@ struct expression_statement: statement {
 	void print(FILE *f, unsigned int indent)
 	{
 		fprintf(f, "%*s", 2 * indent, "");
-		expr->print(f);
+		expr->print(f, indent);
 		fprintf(f, ";\n");
 	}
 };
@@ -700,9 +687,9 @@ struct function {
 	type_ptr return_type;
 	std::vector<type_ptr> arg_types;
 
-	statement_ptr body;
+	expr_ptr body;
 
-	function(std::string name, type_ptr return_type, std::vector<type_ptr> arg_types, statement_ptr body):
+	function(std::string name, type_ptr return_type, std::vector<type_ptr> arg_types, expr_ptr body):
 		name(name),
 		return_type(return_type),
 		arg_types(arg_types),
@@ -759,7 +746,7 @@ struct program {
 
 	ident_allocator ids;
 
-	std::vector<statement_ptr> toplevel_decls;
+	std::vector<expr_ptr> toplevel_decls;
 	std::vector<function_ptr> toplevel_fns;
 
 	function_ptr toplevel_fn;
@@ -774,7 +761,7 @@ struct program {
 		toplevel_call_expr = std::make_shared<call_expression>(std::make_shared<variable_expression>(toplevel_fn->name));
 	}
 
-	program(int toplevel_value, ident_allocator &ids, std::vector<statement_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+	program(int toplevel_value, ident_allocator &ids, std::vector<expr_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
 		toplevel_value(toplevel_value),
 		ids(ids),
 		toplevel_decls(toplevel_decls),
@@ -786,7 +773,7 @@ struct program {
 
 	program_ptr clone()
 	{
-		std::vector<statement_ptr> new_toplevel_decls;
+		std::vector<expr_ptr> new_toplevel_decls;
 		for (auto &stmt_ptr: toplevel_decls)
 			new_toplevel_decls.push_back(stmt_ptr->clone(stmt_ptr));
 
@@ -828,7 +815,7 @@ struct program {
 		fprintf(f, "int main(int argc, char *argv[])\n");
 		fprintf(f, "{\n");
 		fprintf(f, "  printf(\"%%d\\n\", ");
-		toplevel_call_expr->print(f);
+		toplevel_call_expr->print(f, 0);
 		fprintf(f, ");\n");
 		fprintf(f, "}\n");
 	}
@@ -895,10 +882,10 @@ std::vector<find_result<T>> find_exprs(program_ptr p)
 template<typename T>
 struct find_stmts_result {
 	function_ptr fn;
-	statement_ptr &stmt_ptr_ref;
+	expr_ptr &stmt_ptr_ref;
 	std::shared_ptr<T> stmt;
 
-	find_stmts_result(function_ptr fn, statement_ptr &stmt_ptr_ref, std::shared_ptr<T> stmt):
+	find_stmts_result(function_ptr fn, expr_ptr &stmt_ptr_ref, std::shared_ptr<T> stmt):
 		fn(fn),
 		stmt_ptr_ref(stmt_ptr_ref),
 		stmt(stmt)
@@ -921,7 +908,7 @@ std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(v
 		{
 		}
 
-		void visit(function_ptr fn, statement_ptr &s)
+		void visit(function_ptr fn, expr_ptr &s)
 		{
 			if (!filter(*this))
 				return;
@@ -953,7 +940,7 @@ static program_ptr transform_integer_to_statement_expression(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	std::vector<statement_ptr> stmts;
+	std::vector<expr_ptr> stmts;
 	auto new_e = std::make_shared<statement_expression>(std::make_shared<block_statement>(stmts), std::make_shared<expression_statement>(int_e));
 	e.expr_ptr_ref = new_e;
 	return new_p;
@@ -1356,8 +1343,8 @@ static program_ptr transform_insert_if(program_ptr p)
 	auto block_stmt = stmt.stmt;
 
 	auto cond_expr = std::make_shared<int_literal_expression>(std::uniform_int_distribution<int>(0, 1)(re));
-	statement_ptr true_stmt = std::make_shared<block_statement>();
-	statement_ptr false_stmt = std::make_shared<block_statement>();
+	expr_ptr true_stmt = std::make_shared<block_statement>();
+	expr_ptr false_stmt = std::make_shared<block_statement>();
 
 	if (cond_expr->value)
 		false_stmt = std::make_shared<unreachable_statement>(false_stmt);
