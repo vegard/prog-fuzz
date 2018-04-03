@@ -159,7 +159,7 @@ struct testcase {
 		//
 		// Too large test cases slow everything down, but new mutations
 		// tend to make them bigger.
-		const unsigned int max_size = 2048;
+		const unsigned int max_size = 1800;
 		unsigned int size = root->size();
 		score += ((size < max_size) ? max_size : size - max_size) / 5;
 #endif
@@ -279,12 +279,15 @@ int main(int argc, char *argv[])
 		error(EXIT_FAILURE, errno, "gettimeofday()");
 
 	static char stderr_filename[PATH_MAX];
-	snprintf(stderr_filename, sizeof(stderr_filename), "stderr-%lu.txt", tv_start.tv_sec);
+	snprintf(stderr_filename, sizeof(stderr_filename), "stderr/%lu-%d.txt", tv_start.tv_sec, getpid());
+
+	static char filename[PATH_MAX];
+	snprintf(filename, sizeof(filename), "output/%lu-%d.rs", tv_start.tv_sec, getpid());
 
 	unsigned int mutation_counters[nr_mutations] = {};
 	unsigned int trace_bits_counters[MAP_SIZE] = {};
 
-	fixed_priority_queue<testcase> pq(1200);
+	fixed_priority_queue<testcase> pq(750);
 
 	unsigned int nr_execs = 0;
 	unsigned int nr_execs_without_new_bits = 0;
@@ -298,8 +301,8 @@ int main(int argc, char *argv[])
 #endif
 
 #if 1 // periodically resetting (restarting) everything seems beneficial for now; interesting future angle WRT SAT solver restarts
-		if (nr_execs_without_new_bits == 50) {
-			pq = fixed_priority_queue<testcase>(1200);
+		if (nr_execs_without_new_bits == 250) {
+			pq = fixed_priority_queue<testcase>(750);
 			for (unsigned int i = 0; i < nr_mutations; ++i)
 				mutation_counters[i] = 0;
 			for (unsigned int i = 0; i < MAP_SIZE; ++i)
@@ -362,12 +365,7 @@ int main(int argc, char *argv[])
 			//
 			// exec() the compiler. You need to substitute the path to your own compiler here.
 
-			//if (execlp("/usr/bin/g++-5", "g++", "-x", "c++", "-std=c++14", "-Os", "-c", "-", NULL) == -1)
-			//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/xgcc", "xgcc", "-x", "c++", "-std=c++14", "-O3", "-c", "-", NULL) == -1)
-			//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/xgcc", "xgcc", "-x", "c++", "-std=c++14", "-O3", "-Wall", "-fpermissive", "-g", "-pg", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-fsanitize=undefined", "-fsanitize=address", "-fsanitize=leak", "-c", "-", NULL) == -1)
-			//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/xgcc", "xgcc", "-x", "c++", "-std=c++14", "-O3", "-Wall", "-fpermissive", "-g", "-pg", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-fsanitize=undefined", "-fsanitize=address", "-fsanitize=leak", "-S", "-", NULL) == -1)
-			// invoke cc1plus directly (skips fork+exec)
-			if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-imultiarch", "x86_64-linux-gnu", "-iprefix", "/home/vegard/personal/programming/gcc/build/gcc/../lib/gcc/x86_64-pc-linux-gnu/8.0.1/", "-D_GNU_SOURCE", "-", "-quiet", "-dumpbase", "-", "-mtune=generic", "-march=x86-64", "-auxbase", "-", "-g", "-O3", "-Wall", "-std=c++14", "-p", "-fpermissive", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", /*"-fsanitize=undefined",*/ "-fsanitize=address", "-fsanitize=leak", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "-.s", NULL) == -1)
+			if (execlp("/home/vegard/rust/build/x86_64-unknown-linux-gnu/stage2/bin/rustc", "/home/vegard/rust/build/x86_64-unknown-linux-gnu/stage2/bin/rustc", "--emit", "asm", "-Z", "unstable-options", "--error-format", "short", /*"-Z", "no-trans",*/ "-Z", "no-verify", "-Z", "fewer-names", "-Z", "query-threads=1", "-", NULL) == -1)
 				error(EXIT_FAILURE, errno, "execvp()");
 		}
 
@@ -397,12 +395,13 @@ int main(int argc, char *argv[])
 		++nr_execs;
 
 		if (WIFSIGNALED(status)) {
-#if 0 // Ignore segfaults for now, have to wait for a fix for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84576
+#if 1 // Ignore segfaults for now, have to wait for a fix for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84576
 			printf("signal %d:\n", WTERMSIG(status));
 			root->print(stdout);
 			printf("\n");
 
-			FILE *fp = fopen("/tmp/random.cc", "w");
+			printf("Writing reproducer to %s\n", filename);
+			FILE *fp = fopen(filename, "w");
 			if (!fp)
 				error(EXIT_FAILURE, errno, "fopen()");
 			root->print(fp);
@@ -418,24 +417,23 @@ int main(int argc, char *argv[])
 			if (!f)
 				error(EXIT_FAILURE, errno, "fopen()");
 
-			static char buffer[10 * 4096];
+			static char buffer[100 * 4096];
 			size_t len = fread(buffer, 1, sizeof(buffer), f);
 			fclose(f);
 
 			if (len > 0) {
 				buffer[len - 1] = '\0';
 
+				//fwrite(buffer, 1, len, stdout);
+
 				// Check for ICEs, but ignore a set of specific ones which we've
 				// already reported and which keep showing up.
-				if (strstr(buffer, "internal compiler error") && !strstr(buffer, "types may not be defined in parameter types") && !strstr(buffer, "internal compiler error: in synthesize_implicit_template_parm") && !strstr(buffer, "internal compiler error: in search_anon_aggr") && !strstr(buffer, "non_type_check") && !strstr(buffer, "internal compiler error: in xref_basetypes, at") && !strstr(buffer, "internal compiler error: in build_capture_proxy") && !strstr(buffer, "internal compiler error: tree check: expected record_type or union_type or qual_union_type, have array_type in reduced_constant_expression_p") && !strstr(buffer, "internal compiler error: in cp_lexer_new_from_tokens") && !strstr(buffer, "internal compiler error: in extract_constrain_insn") && !strstr(buffer, "in lra_eliminate_reg_if_possible") && !strstr(buffer, "Max. number of generated reload insns per insn is achieved") && !strstr(buffer, "standard_conversion") && !strstr(buffer, "in pop_local_binding") && !strstr(buffer, "of kind implicit_conv_expr") && !strstr(buffer, "in cp_build_addr_expr_1") && !strstr(buffer, "in poplevel_class, at") && !strstr(buffer, "force_constant_size")) {
+				if ((strstr(buffer, "fatal error") || strstr(buffer, "egmentation") || strstr(buffer, "segfault") || strstr(buffer, "signal 6:") || strstr(buffer, "Assertion ") || strstr(buffer, "Aborted") || strstr(buffer, "internal compiler error")) && !strstr(buffer, "invalid loop id for break: not inside loop scope") && !strstr(buffer, "local_def_id: no entry for") && !strstr(buffer, "tuple struct pattern not applied to an ADT") && !strstr(buffer, "assertion failed: self.tcx.sess.err_count() > 0") && !strstr(buffer, "unexpected type for tuple pattern: TyError") && !strstr(buffer, "invalid loop id for break: label not found") && !strstr(buffer, "invalid loop id for continue: not inside loop scope")) {
 					printf("ICE:\n");
 					root->print(stdout);
 					printf("\n");
 
-					char filename[PATH_MAX];
-					snprintf(filename, sizeof(filename), "output/%lu.cc", tv.tv_sec);
 					printf("Writing reproducer to %s\n", filename);
-
 					FILE *fp = fopen(filename, "w");
 					if (!fp)
 						error(EXIT_FAILURE, errno, "fopen()");
@@ -460,11 +458,6 @@ int main(int argc, char *argv[])
 				}
 			}
 
-			if (new_bits)
-				nr_execs_without_new_bits = 0;
-			else
-				++nr_execs_without_new_bits;
-
 			auto mutations = current.mutations;
 			mutations.insert(mutation);
 			testcase new_testcase(root, current.generation + 1, mutations, current.mutation_counter + ++mutation_counters[mutation], current.new_bits + new_bits);
@@ -474,6 +467,17 @@ int main(int argc, char *argv[])
 			printf("\n");
 
 			pq.push(new_testcase);
+
+			if (new_bits)
+				nr_execs_without_new_bits = 0;
+			else
+				++nr_execs_without_new_bits;
+		} else {
+			++nr_execs_without_new_bits;
+		}
+
+		if (nr_execs_without_new_bits > 150) {
+			pq.pop();
 		}
 
 		remove_shm();
