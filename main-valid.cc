@@ -642,30 +642,34 @@ struct asm_statement: statement {
 };
 
 struct statement_expression: expression {
-	statement_ptr stmt;
+	statement_ptr block_stmt;
+	statement_ptr last_stmt;
 
-	statement_expression(statement_ptr stmt):
-		stmt(stmt)
+	statement_expression(statement_ptr block_stmt, statement_ptr last_stmt):
+		block_stmt(block_stmt),
+		last_stmt(last_stmt)
 	{
 	}
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<statement_expression>(stmt->clone(stmt));
+		return std::make_shared<statement_expression>(block_stmt->clone(block_stmt), last_stmt->clone(last_stmt));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
 	{
 		v.visit(fn, this_ptr);
 
-		stmt->visit(fn, stmt, v);
+		block_stmt->visit(fn, block_stmt, v);
+		last_stmt->visit(fn, last_stmt, v);
 	}
 
 	void print(FILE *f)
 	{
 		fprintf(f, "({ ");
-		stmt->print(f, 0);
-		fprintf(f, " })");
+		block_stmt->print(f, 0);
+		last_stmt->print(f, 0);
+		fprintf(f, "})");
 	}
 };
 
@@ -956,7 +960,8 @@ static program_ptr transform_integer_to_statement_expression(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	auto new_e = std::make_shared<statement_expression>(std::make_shared<expression_statement>(int_e));
+	std::vector<statement_ptr> stmts;
+	auto new_e = std::make_shared<statement_expression>(std::make_shared<block_statement>(stmts), std::make_shared<expression_statement>(int_e));
 	e.expr_ptr_ref = new_e;
 	return new_p;
 }
