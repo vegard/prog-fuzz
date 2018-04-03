@@ -1593,8 +1593,12 @@ static bool build_and_run(program_ptr p)
 	p->print(fcurr);
 	fclose(fcurr);
 
-	int pipefd[2];
-	if (pipe2(pipefd, 0) == -1)
+	int stdin_pipefd[2];
+	if (pipe2(stdin_pipefd, 0) == -1)
+		error(EXIT_FAILURE, errno, "pipe2()");
+
+	int stderr_pipefd[2];
+	if (pipe2(stderr_pipefd, 0) == -1)
 		error(EXIT_FAILURE, errno, "pipe2()");
 
 	setup_shm();
@@ -1604,21 +1608,40 @@ static bool build_and_run(program_ptr p)
 		error(EXIT_FAILURE, errno, "fork()");
 
 	if (child == 0) {
-		close(pipefd[1]);
-		dup2(pipefd[0], STDIN_FILENO);
-		close(pipefd[0]);
+		close(stdin_pipefd[1]);
+		dup2(stdin_pipefd[0], STDIN_FILENO);
+		close(stdin_pipefd[0]);
 
+		close(stderr_pipefd[0]);
+		dup2(stderr_pipefd[1], STDERR_FILENO);
+		close(stderr_pipefd[1]);
 		if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-O3", "-Wno-div-by-zero", "-Wno-unused-value", "-Wno-int-to-pointer-cast", "-std=c++14", "-fpermissive", "-fwhole-program", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
 		//if (execlp("/home/vegard/personal/programming/gcc/build/gcc/cc1plus", "cc1plus", "-quiet", "-g", "-Wall", "-std=c++14", "-ftree-pre", "-fstack-protector-all", "-faggressive-loop-optimizations", "-fauto-inc-dec", "-fbranch-probabilities", "-fbranch-target-load-optimize2", "-fcheck-data-deps", "-fcompare-elim", "-fdce", "-fdse", "-fexpensive-optimizations", "-fhoist-adjacent-loads", "-fgcse-lm", "-fgcse-sm", "-fipa-profile", "-fno-toplevel-reorder", "-fsched-group-heuristic", "-fschedule-fusion", "-fschedule-insns", "-fschedule-insns2", "-ftracer", "-funroll-loops", "-fvect-cost-model", "-o", "prog.s", NULL) == -1)
 			error(EXIT_FAILURE, errno, "execvp()");
 	}
 
-	close(pipefd[0]);
-	FILE *f = fdopen(pipefd[1], "w");
+	close(stdin_pipefd[0]);
+	FILE *f = fdopen(stdin_pipefd[1], "w");
 	if (!f)
 		error(EXIT_FAILURE, errno, "fdopen()");
 	p->print(f);
 	fclose(f);
+
+	static char stderr_buffer[10 * 4096];
+	size_t stderr_len;
+
+	{
+		close(stderr_pipefd[1]);
+		FILE *f = fdopen(stderr_pipefd[0], "r");
+		if (!f)
+			error(EXIT_FAILURE, errno, "fdopen()");
+
+		stderr_len = fread(stderr_buffer, 1, sizeof(stderr_buffer), f);
+		if (stderr_len > 0)
+			stderr_buffer[stderr_len - 1] = '\0';
+
+		fclose(f);
+	}
 
 	int status;
 	while (true) {
@@ -1643,6 +1666,21 @@ static bool build_and_run(program_ptr p)
 
 	if (WIFEXITED(status) && WEXITSTATUS(status) != 0) {
 		printf("cc1plus WIFEXITED; exit code = %d\n", WEXITSTATUS(status));
+
+		// TODO
+		bool ignore = false;
+		if (strstr(stderr_buffer, "internal compiler error")) {
+			if (strstr(stderr_buffer, "unexpected expression") && strstr(stderr_buffer, "of kind asm_expr"))
+				ignore = true;
+			if (strstr(stderr_buffer, "gimplification failed"))
+				ignore = true;
+		}
+
+		if (ignore) {
+			remove_shm();
+			return false;
+		}
+
 		exit(1);
 	}
 
