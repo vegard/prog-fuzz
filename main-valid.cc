@@ -90,6 +90,17 @@ static type_ptr voidp_type = std::make_shared<type>("void *");
 static type_ptr int_type = std::make_shared<type>("int");
 
 struct expression {
+	unsigned int generation;
+
+	expression(unsigned int generation):
+		generation(generation)
+	{
+	}
+
+	virtual ~expression()
+	{
+	}
+
 	virtual expr_ptr clone(expr_ptr &this_ptr) = 0;
 
 	virtual void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -104,14 +115,15 @@ struct expression {
 struct unreachable_expression: expression {
 	expr_ptr expr;
 
-	unreachable_expression(expr_ptr expr):
+	unreachable_expression(unsigned int generation, expr_ptr expr):
+		expression(generation),
 		expr(expr)
 	{
 	}
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<unreachable_expression>(expr->clone(expr));
+		return std::make_shared<unreachable_expression>(generation, expr->clone(expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -132,7 +144,8 @@ struct variable_expression: expression {
 	// TODO: should we have a separate class variable as well?
 	std::string name;
 
-	variable_expression(std::string name):
+	variable_expression(unsigned int generation, std::string name):
+		expression(generation),
 		name(name)
 	{
 	}
@@ -151,7 +164,8 @@ struct variable_expression: expression {
 struct int_literal_expression: expression {
 	int value;
 
-	int_literal_expression(int value):
+	int_literal_expression(unsigned int generation, int value):
+		expression(generation),
 		value(value)
 	{
 	}
@@ -171,7 +185,8 @@ struct cast_expression: expression {
 	type_ptr type;
 	expr_ptr expr;
 
-	cast_expression(type_ptr type, expr_ptr expr):
+	cast_expression(unsigned int generation, type_ptr type, expr_ptr expr):
+		expression(generation),
 		type(type),
 		expr(expr)
 	{
@@ -179,7 +194,7 @@ struct cast_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<cast_expression>(type, expr->clone(expr));
+		return std::make_shared<cast_expression>(generation, type, expr->clone(expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -203,13 +218,15 @@ struct call_expression: expression {
 	expr_ptr fn_expr;
 	std::vector<expr_ptr> arg_exprs;
 
-	call_expression(expr_ptr fn_expr, std::initializer_list<expr_ptr> arg_exprs = {}):
+	call_expression(unsigned int generation, expr_ptr fn_expr, std::initializer_list<expr_ptr> arg_exprs = {}):
+		expression(generation),
 		fn_expr(fn_expr),
 		arg_exprs(arg_exprs)
 	{
 	}
 
-	call_expression(expr_ptr fn_expr, std::vector<expr_ptr> arg_exprs):
+	call_expression(unsigned int generation, expr_ptr fn_expr, std::vector<expr_ptr> arg_exprs):
+		expression(generation),
 		fn_expr(fn_expr),
 		arg_exprs(arg_exprs)
 	{
@@ -221,7 +238,7 @@ struct call_expression: expression {
 		for (auto &arg_expr: arg_exprs)
 			new_arg_exprs.push_back(arg_expr->clone(arg_expr));
 
-		return std::make_shared<call_expression>(fn_expr->clone(fn_expr), new_arg_exprs);
+		return std::make_shared<call_expression>(generation, fn_expr->clone(fn_expr), new_arg_exprs);
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -253,7 +270,8 @@ struct preop_expression: expression {
 	std::string op;
 	expr_ptr arg;
 
-	preop_expression(std::string op, expr_ptr arg):
+	preop_expression(unsigned int generation, std::string op, expr_ptr arg):
+		expression(generation),
 		op(op),
 		arg(arg)
 	{
@@ -261,7 +279,7 @@ struct preop_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<preop_expression>(op, arg->clone(arg));
+		return std::make_shared<preop_expression>(generation, op, arg->clone(arg));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -284,7 +302,8 @@ struct binop_expression: expression {
 	expr_ptr lhs;
 	expr_ptr rhs;
 
-	binop_expression(std::string op, expr_ptr lhs, expr_ptr rhs):
+	binop_expression(unsigned int generation, std::string op, expr_ptr lhs, expr_ptr rhs):
+		expression(generation),
 		op(op),
 		lhs(lhs),
 		rhs(rhs)
@@ -293,7 +312,7 @@ struct binop_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<binop_expression>(op, lhs->clone(lhs), rhs->clone(rhs));
+		return std::make_shared<binop_expression>(generation, op, lhs->clone(lhs), rhs->clone(rhs));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -321,7 +340,8 @@ struct ternop_expression: expression {
 	expr_ptr arg2;
 	expr_ptr arg3;
 
-	ternop_expression(std::string op1, std::string op2, expr_ptr arg1, expr_ptr arg2, expr_ptr arg3):
+	ternop_expression(unsigned int generation, std::string op1, std::string op2, expr_ptr arg1, expr_ptr arg2, expr_ptr arg3):
+		expression(generation),
 		op1(op1),
 		op2(op2),
 		arg1(arg1),
@@ -332,7 +352,7 @@ struct ternop_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<ternop_expression>(op1, op2, arg1->clone(arg1), arg2->clone(arg2), arg3->clone(arg3));
+		return std::make_shared<ternop_expression>(generation, op1, op2, arg1->clone(arg1), arg2->clone(arg2), arg3->clone(arg3));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -359,14 +379,15 @@ struct ternop_expression: expression {
 struct unreachable_statement: expression {
 	expr_ptr stmt;
 
-	unreachable_statement(expr_ptr stmt):
+	unreachable_statement(unsigned int generation, expr_ptr stmt):
+		expression(generation),
 		stmt(stmt)
 	{
 	}
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<unreachable_statement>(stmt->clone(stmt));
+		return std::make_shared<unreachable_statement>(generation, stmt->clone(stmt));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -390,7 +411,8 @@ struct declaration_statement: statement {
 	expr_ptr var_expr;
 	expr_ptr value_expr;
 
-	declaration_statement(type_ptr var_type, expr_ptr var_expr, expr_ptr value_expr):
+	declaration_statement(unsigned int generation, type_ptr var_type, expr_ptr var_expr, expr_ptr value_expr):
+		expression(generation),
 		var_type(var_type),
 		var_expr(var_expr),
 		value_expr(value_expr)
@@ -399,7 +421,7 @@ struct declaration_statement: statement {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<declaration_statement>(var_type, var_expr->clone(var_expr), value_expr->clone(value_expr));
+		return std::make_shared<declaration_statement>(generation, var_type, var_expr->clone(var_expr), value_expr->clone(value_expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -426,14 +448,15 @@ struct declaration_statement: statement {
 struct return_statement: statement {
 	expr_ptr ret_expr;
 
-	return_statement(expr_ptr ret_expr):
+	return_statement(unsigned int generation, expr_ptr ret_expr):
+		expression(generation),
 		ret_expr(ret_expr)
 	{
 	}
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<return_statement>(ret_expr->clone(ret_expr));
+		return std::make_shared<return_statement>(generation, ret_expr->clone(ret_expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -454,11 +477,13 @@ struct return_statement: statement {
 struct block_statement: statement {
 	std::vector<expr_ptr> statements;
 
-	block_statement()
+	explicit block_statement(unsigned int generation):
+		expression(generation)
 	{
 	}
 
-	explicit block_statement(std::vector<expr_ptr> &statements):
+	explicit block_statement(unsigned int generation, std::vector<expr_ptr> &statements):
+		expression(generation),
 		statements(statements)
 	{
 	}
@@ -469,7 +494,7 @@ struct block_statement: statement {
 		for (auto &stmt: statements)
 			new_statements.push_back(stmt->clone(stmt));
 
-		return std::make_shared<block_statement>(new_statements);
+		return std::make_shared<block_statement>(generation, new_statements);
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -494,7 +519,8 @@ struct if_statement: statement {
 	expr_ptr true_stmt;
 	expr_ptr false_stmt;
 
-	if_statement(expr_ptr cond_expr, expr_ptr true_stmt, expr_ptr false_stmt):
+	if_statement(unsigned int generation, expr_ptr cond_expr, expr_ptr true_stmt, expr_ptr false_stmt):
+		expression(generation),
 		cond_expr(cond_expr),
 		true_stmt(true_stmt),
 		false_stmt(false_stmt)
@@ -503,7 +529,7 @@ struct if_statement: statement {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<if_statement>(cond_expr->clone(cond_expr), true_stmt->clone(true_stmt), false_stmt ? false_stmt->clone(false_stmt) : false_stmt);
+		return std::make_shared<if_statement>(generation, cond_expr->clone(cond_expr), true_stmt->clone(true_stmt), false_stmt ? false_stmt->clone(false_stmt) : false_stmt);
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -534,7 +560,8 @@ struct asm_constraint_expression: expression {
 	std::string constraint;
 	expr_ptr expr;
 
-	asm_constraint_expression(std::string constraint, expr_ptr expr):
+	asm_constraint_expression(unsigned int generation, std::string constraint, expr_ptr expr):
+		expression(generation),
 		constraint(constraint),
 		expr(expr)
 	{
@@ -542,7 +569,7 @@ struct asm_constraint_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<asm_constraint_expression>(constraint, expr->clone(expr));
+		return std::make_shared<asm_constraint_expression>(generation, constraint, expr->clone(expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -565,7 +592,8 @@ struct asm_statement: statement {
 	std::vector<expr_ptr> outputs;
 	std::vector<expr_ptr> inputs;
 
-	asm_statement(bool is_volatile, std::vector<expr_ptr> outputs, std::vector<expr_ptr> inputs):
+	asm_statement(unsigned int generation, bool is_volatile, std::vector<expr_ptr> outputs, std::vector<expr_ptr> inputs):
+		expression(generation),
 		is_volatile(is_volatile),
 		outputs(outputs),
 		inputs(inputs)
@@ -582,7 +610,7 @@ struct asm_statement: statement {
 		for (auto &input_expr: inputs)
 			new_inputs.push_back(input_expr->clone(input_expr));
 
-		return std::make_shared<asm_statement>(is_volatile, new_outputs, new_inputs);
+		return std::make_shared<asm_statement>(generation, is_volatile, new_outputs, new_inputs);
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -625,7 +653,8 @@ struct statement_expression: expression {
 	expr_ptr block_stmt;
 	expr_ptr last_stmt;
 
-	statement_expression(expr_ptr block_stmt, expr_ptr last_stmt):
+	statement_expression(unsigned int generation, expr_ptr block_stmt, expr_ptr last_stmt):
+		expression(generation),
 		block_stmt(block_stmt),
 		last_stmt(last_stmt)
 	{
@@ -633,7 +662,7 @@ struct statement_expression: expression {
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<statement_expression>(block_stmt->clone(block_stmt), last_stmt->clone(last_stmt));
+		return std::make_shared<statement_expression>(generation, block_stmt->clone(block_stmt), last_stmt->clone(last_stmt));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_ptr, visitor &v)
@@ -656,14 +685,15 @@ struct statement_expression: expression {
 struct expression_statement: statement {
 	expr_ptr expr;
 
-	expression_statement(expr_ptr expr):
+	expression_statement(unsigned int generation, expr_ptr expr):
+		expression(generation),
 		expr(expr)
 	{
 	}
 
 	expr_ptr clone(expr_ptr &this_ptr)
 	{
-		return std::make_shared<expression_statement>(expr->clone(expr));
+		return std::make_shared<expression_statement>(generation, expr->clone(expr));
 	}
 
 	void visit(function_ptr fn, expr_ptr &this_stmt, visitor &v)
@@ -742,6 +772,8 @@ struct ident_allocator {
 };
 
 struct program {
+	unsigned int generation;
+
 	int toplevel_value;
 
 	ident_allocator ids;
@@ -753,15 +785,17 @@ struct program {
 	expr_ptr toplevel_call_expr;
 
 	explicit program(int toplevel_value):
+		generation(0),
 		toplevel_value(toplevel_value)
 	{
-		auto body = std::make_shared<block_statement>();
-		body->statements.push_back(std::make_shared<return_statement>(std::make_shared<int_literal_expression>(toplevel_value)));
+		auto body = std::make_shared<block_statement>(generation);
+		body->statements.push_back(std::make_shared<return_statement>(generation, std::make_shared<int_literal_expression>(generation, toplevel_value)));
 		toplevel_fn = std::make_shared<function>(ids.new_ident(), int_type, std::vector<type_ptr>(), body);
-		toplevel_call_expr = std::make_shared<call_expression>(std::make_shared<variable_expression>(toplevel_fn->name));
+		toplevel_call_expr = std::make_shared<call_expression>(generation, std::make_shared<variable_expression>(generation, toplevel_fn->name));
 	}
 
-	program(int toplevel_value, ident_allocator &ids, std::vector<expr_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+	program(unsigned int generation, int toplevel_value, ident_allocator &ids, std::vector<expr_ptr> toplevel_decls, std::vector<function_ptr> toplevel_fns, function_ptr toplevel_fn, expr_ptr toplevel_call_expr):
+		generation(generation),
 		toplevel_value(toplevel_value),
 		ids(ids),
 		toplevel_decls(toplevel_decls),
@@ -781,7 +815,7 @@ struct program {
 		for (auto &fn_ptr: toplevel_fns)
 			new_toplevel_fns.push_back(fn_ptr->clone());
 
-		return std::make_shared<program>(toplevel_value, ids, new_toplevel_decls, new_toplevel_fns, toplevel_fn->clone(), toplevel_call_expr->clone(toplevel_call_expr));
+		return std::make_shared<program>(generation + 1, toplevel_value, ids, new_toplevel_decls, new_toplevel_fns, toplevel_fn->clone(), toplevel_call_expr->clone(toplevel_call_expr));
 	}
 
 	void visit(visitor &v)
@@ -831,22 +865,21 @@ static std::default_random_engine re;
 template<typename T>
 struct find_result {
 	function_ptr fn;
-	expr_ptr &expr_ptr_ref;
+	expr_ptr *expr_ptr_ref;
 	std::shared_ptr<T> expr;
 
 	find_result(function_ptr fn, expr_ptr &expr_ptr_ref, std::shared_ptr<T> expr):
 		fn(fn),
-		expr_ptr_ref(expr_ptr_ref),
+		expr_ptr_ref(&expr_ptr_ref),
 		expr(expr)
 	{
 	}
 
-#if 0
-	find_result<T> &operator=(find_result<T> &&other)
+	// sort by generation in descending order (used for picking more recently modified expressions)
+	bool operator<(const find_result &other) const
 	{
-		
+		return expr->generation > other.expr->generation;
 	}
-#endif
 };
 
 template<typename T>
@@ -879,20 +912,48 @@ std::vector<find_result<T>> find_exprs(program_ptr p)
 	return result;
 }
 
+// parameter to the geometric distribution we use to pick expressions to mutate
+static const double find_p = .1;
+
+template<typename T>
+std::vector<find_result<T>> find_expr(program_ptr p)
+{
+	auto results = find_exprs<T>(p);
+	if (results.empty())
+		return results;
+
+	std::sort(results.begin(), results.end());
+
+	unsigned int index = std::geometric_distribution<unsigned int>(find_p)(re);
+	if (index >= results.size())
+		index = results.size() - 1;
+
+	std::vector<find_result<T>> new_results;
+	new_results.push_back(results[index]);
+	return new_results;
+}
+
 template<typename T>
 struct find_stmts_result {
 	function_ptr fn;
-	expr_ptr &stmt_ptr_ref;
+	expr_ptr *stmt_ptr_ref;
 	std::shared_ptr<T> stmt;
 
 	find_stmts_result(function_ptr fn, expr_ptr &stmt_ptr_ref, std::shared_ptr<T> stmt):
 		fn(fn),
-		stmt_ptr_ref(stmt_ptr_ref),
+		stmt_ptr_ref(&stmt_ptr_ref),
 		stmt(stmt)
 	{
 	}
+
+	// sort by generation in descending order (used for picking more recently modified expressions)
+	bool operator<(const find_stmts_result &other) const
+	{
+		return stmt->generation > other.stmt->generation;
+	}
 };
 
+// TODO: merge this with find_expr() above...
 template<typename T>
 std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(visitor &)> filter = [](visitor &){ return true; })
 {
@@ -924,14 +985,56 @@ std::vector<find_stmts_result<T>> find_stmts(program_ptr p, std::function<bool(v
 	return result;
 }
 
+template<typename T>
+std::vector<find_stmts_result<T>> find_stmt(program_ptr p, std::function<bool(visitor &)> filter = [](visitor &){ return true; })
+{
+	auto results = find_stmts<T>(p, filter);
+	if (results.empty())
+		return results;
+
+	std::sort(results.begin(), results.end());
+
+	unsigned int index = std::geometric_distribution<unsigned int>(find_p)(re);
+	if (index >= results.size())
+		index = results.size() - 1;
+
+	std::vector<find_stmts_result<T>> new_results;
+	new_results.push_back(results[index]);
+	return new_results;
+}
+
+
+#if 0
+static void walk(program_ptr p, std::function<void(visitor &)> callback)
+{
+	struct walk_visitor: visitor {
+		std::function<void(visitor &)> cb;
+
+		walk_visitor(std::function<void(visitor &)> cb):
+			cb(cb)
+		{
+		}
+
+		void visit(expr_ptr &ref)
+		{
+			cb(*this);
+		}
+	};
+
+	walk_visitor v(callback);
+	p->visit(v);
+}
+#endif
+
 // Integer transformations
 
 static program_ptr transform_integer_to_statement_expression(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -941,17 +1044,20 @@ static program_ptr transform_integer_to_statement_expression(program_ptr p)
 
 	// Replace by a new expression
 	std::vector<expr_ptr> stmts;
-	auto new_e = std::make_shared<statement_expression>(std::make_shared<block_statement>(stmts), std::make_shared<expression_statement>(int_e));
-	e.expr_ptr_ref = new_e;
+	auto new_e = std::make_shared<statement_expression>(generation,
+		std::make_shared<block_statement>(generation, stmts),
+		std::make_shared<expression_statement>(generation, int_e));
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_sum(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -971,10 +1077,10 @@ static program_ptr transform_integer_to_sum(program_ptr p)
 	int value_b = int_e->value - value_a;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(value_a);
-	auto b_expr = std::make_shared<int_literal_expression>(value_b);
-	auto new_e = std::make_shared<binop_expression>("+", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, value_b);
+	auto new_e = std::make_shared<binop_expression>(generation, "+", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
@@ -993,9 +1099,10 @@ static int gcd(int a, int b)
 static program_ptr transform_integer_to_product(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1013,19 +1120,20 @@ static program_ptr transform_integer_to_product(program_ptr p)
 	int value_b = int_e->value / value_a;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(value_a);
-	auto b_expr = std::make_shared<int_literal_expression>(value_b);
-	auto new_e = std::make_shared<binop_expression>("*", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, value_b);
+	auto new_e = std::make_shared<binop_expression>(generation, "*", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_negation(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1034,18 +1142,19 @@ static program_ptr transform_integer_to_negation(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	auto arg_expr = std::make_shared<int_literal_expression>(~int_e->value);
-	auto new_e = std::make_shared<preop_expression>("~", arg_expr);
-	e.expr_ptr_ref = new_e;
+	auto arg_expr = std::make_shared<int_literal_expression>(generation, ~int_e->value);
+	auto new_e = std::make_shared<preop_expression>(generation, "~", arg_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_conjunction(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1060,19 +1169,20 @@ static program_ptr transform_integer_to_conjunction(program_ptr p)
 	int value_b = int_e->value | ~r;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(value_a);
-	auto b_expr = std::make_shared<int_literal_expression>(value_b);
-	auto new_e = std::make_shared<binop_expression>("&", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, value_b);
+	auto new_e = std::make_shared<binop_expression>(generation, "&", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_disjunction(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1087,19 +1197,20 @@ static program_ptr transform_integer_to_disjunction(program_ptr p)
 	int value_b = int_e->value & ~r;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(value_a);
-	auto b_expr = std::make_shared<int_literal_expression>(value_b);
-	auto new_e = std::make_shared<binop_expression>("|", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, value_b);
+	auto new_e = std::make_shared<binop_expression>(generation, "|", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_xor(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1114,19 +1225,20 @@ static program_ptr transform_integer_to_xor(program_ptr p)
 	int value_b = r ^ ~int_e->value;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(value_a);
-	auto b_expr = std::make_shared<int_literal_expression>(value_b);
-	auto new_e = std::make_shared<binop_expression>("^", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, value_a);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, value_b);
+	auto new_e = std::make_shared<binop_expression>(generation, "^", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_1_to_equals(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto _int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto _int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	decltype(_int_literal_exprs) int_literal_exprs;
 	for (auto x: _int_literal_exprs) {
 		if (x.expr->value == 1)
@@ -1143,19 +1255,20 @@ static program_ptr transform_integer_1_to_equals(program_ptr p)
 	int r = std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re);
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(r);
-	auto b_expr = std::make_shared<int_literal_expression>(r);
-	auto new_e = std::make_shared<binop_expression>("==", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, r);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, r);
+	auto new_e = std::make_shared<binop_expression>(generation, "==", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_1_to_not_equals(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto _int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto _int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	decltype(_int_literal_exprs) int_literal_exprs;
 	for (auto x: _int_literal_exprs) {
 		if (x.expr->value == 1)
@@ -1177,19 +1290,20 @@ static program_ptr transform_integer_1_to_not_equals(program_ptr p)
 	} while (r2 == r1);
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(r1);
-	auto b_expr = std::make_shared<int_literal_expression>(r2);
-	auto new_e = std::make_shared<binop_expression>("!=", a_expr, b_expr);
-	e.expr_ptr_ref = new_e;
+	auto a_expr = std::make_shared<int_literal_expression>(generation, r1);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, r2);
+	auto new_e = std::make_shared<binop_expression>(generation, "!=", a_expr, b_expr);
+	*e.expr_ptr_ref = new_e;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_variable(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1198,11 +1312,11 @@ static program_ptr transform_integer_to_variable(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
-	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	auto new_var = std::make_shared<variable_expression>(generation, new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(generation, int_type, new_var, int_e);
 	auto body = std::dynamic_pointer_cast<block_statement>(e.fn->body);
 	body->statements.insert(body->statements.begin() + 0, new_decl);
-	e.expr_ptr_ref = new_var;
+	*e.expr_ptr_ref = new_var;
 	return new_p;
 }
 
@@ -1210,9 +1324,10 @@ static program_ptr transform_integer_to_variable(program_ptr p)
 static program_ptr transform_integer_to_global_variable(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals (within a function)
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1221,19 +1336,20 @@ static program_ptr transform_integer_to_global_variable(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
-	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	auto new_var = std::make_shared<variable_expression>(generation, new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(generation, int_type, new_var, int_e);
 	new_p->toplevel_decls.insert(new_p->toplevel_decls.begin() + 0, new_decl);
-	e.expr_ptr_ref = new_var;
+	*e.expr_ptr_ref = new_var;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_function(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals (within a function)
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1242,23 +1358,25 @@ static program_ptr transform_integer_to_function(program_ptr p)
 	auto int_e = e.expr;
 
 	// Create new function
-	auto new_body = std::make_shared<block_statement>();
-	new_body->statements.push_back(std::make_shared<return_statement>(int_e));
+	auto new_body = std::make_shared<block_statement>(generation);
+	new_body->statements.push_back(std::make_shared<return_statement>(generation, int_e));
 	auto new_fn = std::make_shared<function>(new_p->ids.new_ident(), int_type, std::vector<type_ptr>(), new_body);
 	new_p->toplevel_fns.insert(new_p->toplevel_fns.begin() + 0, new_fn);
 
 	// Replace by a new expression
-	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>(new_fn->name));
-	e.expr_ptr_ref = new_call;
+	auto new_call = std::make_shared<call_expression>(generation,
+		std::make_shared<variable_expression>(generation, new_fn->name));
+	*e.expr_ptr_ref = new_call;
 	return new_p;
 }
 
 static program_ptr transform_integer_to_builtin_constant_p(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1268,21 +1386,23 @@ static program_ptr transform_integer_to_builtin_constant_p(program_ptr p)
 
 	// Replace by a new expression
 	std::vector<expr_ptr> args;
-	args.push_back(std::make_shared<int_literal_expression>(int_e->value));
-	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_constant_p"), args);
-	auto a_expr = std::make_shared<int_literal_expression>(int_e->value);
-	auto b_expr = std::make_shared<int_literal_expression>(int_e->value);
-	auto new_ternop = std::make_shared<ternop_expression>("?", ":", new_call, a_expr, b_expr);
-	e.expr_ptr_ref = new_ternop;
+	args.push_back(std::make_shared<int_literal_expression>(generation, int_e->value));
+	auto new_call = std::make_shared<call_expression>(generation,
+		std::make_shared<variable_expression>(generation, "__builtin_constant_p"), args);
+	auto a_expr = std::make_shared<int_literal_expression>(generation, int_e->value);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, int_e->value);
+	auto new_ternop = std::make_shared<ternop_expression>(generation, "?", ":", new_call, a_expr, b_expr);
+	*e.expr_ptr_ref = new_ternop;
 	return new_p;
 }
 
 static program_ptr transform_insert_builtin_expect(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1298,19 +1418,21 @@ static program_ptr transform_insert_builtin_expect(program_ptr p)
 
 	// Replace by a new expression
 	std::vector<expr_ptr> args;
-	args.push_back(std::make_shared<int_literal_expression>(int_e->value));
-	args.push_back(std::make_shared<int_literal_expression>(value));
-	auto new_call = std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_expect"), args);
-	e.expr_ptr_ref = new_call;
+	args.push_back(std::make_shared<int_literal_expression>(generation, int_e->value));
+	args.push_back(std::make_shared<int_literal_expression>(generation, value));
+	auto new_call = std::make_shared<call_expression>(generation,
+		std::make_shared<variable_expression>(generation, "__builtin_expect"), args);
+	*e.expr_ptr_ref = new_call;
 	return new_p;
 }
 
 static program_ptr transform_insert_builtin_prefetch(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all block statements
-	auto block_stmts = find_stmts<block_statement>(new_p);
+	auto block_stmts = find_stmt<block_statement>(new_p);
 	if (block_stmts.empty())
 		return p;
 
@@ -1322,8 +1444,11 @@ static program_ptr transform_insert_builtin_prefetch(program_ptr p)
 
 	// Replace by a new expression
 	std::vector<expr_ptr> args;
-	args.push_back(std::make_shared<cast_expression>(voidp_type, std::make_shared<int_literal_expression>(value)));
-	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_prefetch"), args));
+	args.push_back(std::make_shared<cast_expression>(generation, voidp_type,
+		std::make_shared<int_literal_expression>(generation, value)));
+	auto new_stmt = std::make_shared<expression_statement>(generation,
+		std::make_shared<call_expression>(generation,
+			std::make_shared<variable_expression>(generation, "__builtin_prefetch"), args));
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
 	return new_p;
@@ -1332,9 +1457,10 @@ static program_ptr transform_insert_builtin_prefetch(program_ptr p)
 static program_ptr transform_insert_if(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all block statements
-	auto block_stmts = find_stmts<block_statement>(new_p);
+	auto block_stmts = find_stmt<block_statement>(new_p);
 	if (block_stmts.empty())
 		return p;
 
@@ -1342,16 +1468,16 @@ static program_ptr transform_insert_if(program_ptr p)
 	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
 	auto block_stmt = stmt.stmt;
 
-	auto cond_expr = std::make_shared<int_literal_expression>(std::uniform_int_distribution<int>(0, 1)(re));
-	expr_ptr true_stmt = std::make_shared<block_statement>();
-	expr_ptr false_stmt = std::make_shared<block_statement>();
+	auto cond_expr = std::make_shared<int_literal_expression>(generation, std::uniform_int_distribution<int>(0, 1)(re));
+	expr_ptr true_stmt = std::make_shared<block_statement>(generation);
+	expr_ptr false_stmt = std::make_shared<block_statement>(generation);
 
 	if (cond_expr->value)
-		false_stmt = std::make_shared<unreachable_statement>(false_stmt);
+		false_stmt = std::make_shared<unreachable_statement>(generation, false_stmt);
 	else
-		true_stmt = std::make_shared<unreachable_statement>(true_stmt);
+		true_stmt = std::make_shared<unreachable_statement>(generation, true_stmt);
 
-	auto new_stmt = std::make_shared<if_statement>(cond_expr, true_stmt, false_stmt);
+	auto new_stmt = std::make_shared<if_statement>(generation, cond_expr, true_stmt, false_stmt);
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
 	return new_p;
@@ -1360,9 +1486,10 @@ static program_ptr transform_insert_if(program_ptr p)
 static program_ptr transform_insert_asm(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all block statements
-	auto block_stmts = find_stmts<block_statement>(new_p);
+	auto block_stmts = find_stmt<block_statement>(new_p);
 	if (block_stmts.empty())
 		return p;
 
@@ -1370,7 +1497,7 @@ static program_ptr transform_insert_asm(program_ptr p)
 	auto stmt = block_stmts[std::uniform_int_distribution<unsigned int>(0, block_stmts.size() - 1)(re)];
 	auto block_stmt = stmt.stmt;
 
-	auto new_stmt = std::make_shared<asm_statement>(std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>(), std::vector<expr_ptr>());
+	auto new_stmt = std::make_shared<asm_statement>(generation, std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>(), std::vector<expr_ptr>());
 	auto body = std::dynamic_pointer_cast<block_statement>(new_p->toplevel_fn->body);
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
@@ -1381,9 +1508,10 @@ static program_ptr transform_insert_asm(program_ptr p)
 static program_ptr transform_insert_asm_2(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all block statements
-	auto block_stmts = find_stmts<block_statement>(new_p);
+	auto block_stmts = find_stmt<block_statement>(new_p);
 	if (block_stmts.empty())
 		return p;
 
@@ -1403,9 +1531,10 @@ static program_ptr transform_insert_asm_2(program_ptr p)
 static program_ptr transform_insert_builtin_unreachable(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1414,7 +1543,9 @@ static program_ptr transform_insert_builtin_unreachable(program_ptr p)
 	auto block_stmt = stmt.stmt;
 
 	// Replace by a new expression
-	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_unreachable"), std::vector<expr_ptr>()));
+	auto new_stmt = std::make_shared<expression_statement>(generation,
+		std::make_shared<call_expression>(generation,
+			std::make_shared<variable_expression>(generation, "__builtin_unreachable"), std::vector<expr_ptr>()));
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
 	return new_p;
@@ -1423,9 +1554,10 @@ static program_ptr transform_insert_builtin_unreachable(program_ptr p)
 static program_ptr transform_insert_builtin_trap(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1434,7 +1566,9 @@ static program_ptr transform_insert_builtin_trap(program_ptr p)
 	auto block_stmt = stmt.stmt;
 
 	// Replace by a new expression
-	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<call_expression>(std::make_shared<variable_expression>("__builtin_trap"), std::vector<expr_ptr>()));
+	auto new_stmt = std::make_shared<expression_statement>(generation,
+		std::make_shared<call_expression>(generation,
+			std::make_shared<variable_expression>(generation, "__builtin_trap"), std::vector<expr_ptr>()));
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
 	return new_p;
@@ -1443,9 +1577,10 @@ static program_ptr transform_insert_builtin_trap(program_ptr p)
 static program_ptr transform_insert_div_by_0(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all unreachable block statements
-	auto block_stmts = find_stmts<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
+	auto block_stmts = find_stmt<block_statement>(new_p, [](visitor &v) { return v.is_unreachable(); });
 	if (block_stmts.empty())
 		return p;
 
@@ -1454,9 +1589,10 @@ static program_ptr transform_insert_div_by_0(program_ptr p)
 	auto block_stmt = stmt.stmt;
 
 	// Replace by a new expression
-	auto a_expr = std::make_shared<int_literal_expression>(1);
-	auto b_expr = std::make_shared<int_literal_expression>(0);
-	auto new_stmt = std::make_shared<expression_statement>(std::make_shared<binop_expression>("/", a_expr, b_expr));
+	auto a_expr = std::make_shared<int_literal_expression>(generation, 1);
+	auto b_expr = std::make_shared<int_literal_expression>(generation, 0);
+	auto new_stmt = std::make_shared<expression_statement>(generation,
+		std::make_shared<binop_expression>(generation, "/", a_expr, b_expr));
 	auto &statements = block_stmt->statements;
 	statements.insert(statements.begin() + std::uniform_int_distribution<unsigned int>(0, statements.size())(re), new_stmt);
 	return new_p;
@@ -1465,9 +1601,10 @@ static program_ptr transform_insert_div_by_0(program_ptr p)
 static program_ptr transform_integer_to_variable_and_asm(program_ptr p)
 {
 	program_ptr new_p = p->clone();
+	unsigned int generation = new_p->generation;
 
 	// First, find all integer literals
-	auto int_literal_exprs = find_exprs<int_literal_expression>(new_p);
+	auto int_literal_exprs = find_expr<int_literal_expression>(new_p);
 	if (int_literal_exprs.empty())
 		return p;
 
@@ -1476,15 +1613,16 @@ static program_ptr transform_integer_to_variable_and_asm(program_ptr p)
 	auto int_e = e.expr;
 
 	// Replace by a new expression
-	auto new_var = std::make_shared<variable_expression>(new_p->ids.new_ident());
-	auto new_decl = std::make_shared<declaration_statement>(int_type, new_var, int_e);
+	auto new_var = std::make_shared<variable_expression>(generation, new_p->ids.new_ident());
+	auto new_decl = std::make_shared<declaration_statement>(generation, int_type, new_var, int_e);
 	auto body = std::dynamic_pointer_cast<block_statement>(e.fn->body);
 	body->statements.insert(body->statements.begin() + 0, new_decl);
 
-	auto constraint_expr = std::make_shared<asm_constraint_expression>("+r", std::make_shared<variable_expression>(new_var->name));
-	auto new_stmt = std::make_shared<asm_statement>(std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>{constraint_expr}, std::vector<expr_ptr>());
+	auto constraint_expr = std::make_shared<asm_constraint_expression>(generation, "+r",
+		std::make_shared<variable_expression>(generation, new_var->name));
+	auto new_stmt = std::make_shared<asm_statement>(generation, std::uniform_int_distribution<unsigned int>(0, 1)(re), std::vector<expr_ptr>{constraint_expr}, std::vector<expr_ptr>());
 	body->statements.insert(body->statements.begin() + 1, new_stmt);
-	e.expr_ptr_ref = new_var;
+	*e.expr_ptr_ref = new_var;
 	return new_p;
 }
 
