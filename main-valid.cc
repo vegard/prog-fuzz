@@ -26,6 +26,17 @@
 // From AFL
 #include "config.h"
 
+// Parameters
+
+static const unsigned int pool_size = 250;
+static const unsigned int nr_initial_transformations = 250;
+static const unsigned int nr_transformations_multiplier = 25;
+
+// parameter to the geometric distribution we use to pick expressions to mutate
+static const double find_p = .25;
+
+// Types
+
 struct type;
 typedef std::shared_ptr<type> type_ptr;
 
@@ -911,9 +922,6 @@ std::vector<find_result<T>> find_exprs(program_ptr p)
 	p->visit(v);
 	return result;
 }
-
-// parameter to the geometric distribution we use to pick expressions to mutate
-static const double find_p = .1;
 
 template<typename T>
 std::vector<find_result<T>> find_expr(program_ptr p)
@@ -1927,11 +1935,11 @@ int main(int argc, char *argv[])
 	const float alpha = 0.85;
 
 	while (1) {
-		while (testcases.size() < 250) {
+		while (testcases.size() < pool_size) {
 			printf("[%3lu new]... ", testcases.size());
 
 			auto p = std::make_shared<program>(std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re));
-			for (unsigned int i = 0; i < 50; ++i) {
+			for (unsigned int i = 0; i < nr_initial_transformations; ++i) {
 				unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
 				p = transformations[transformation_i](p);
 			}
@@ -1946,20 +1954,20 @@ int main(int argc, char *argv[])
 		printf("[%3u | %2u | %5.2f]... ", testcase_i, t.nr_failures, t.nr_transformations);
 
 		auto p = t.program;
-		for (unsigned int i = 0; i < (unsigned int) std::max(1, (int) ceil(t.nr_transformations)); ++i) {
+		for (unsigned int i = 0; i < (unsigned int) std::max(1, (int) ceil(nr_transformations_multiplier * t.nr_transformations)); ++i) {
 			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
 			p = transformations[transformation_i](p);
 		}
 
 		if (build_and_run(p)) {
-			t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * (10 * t.nr_failures);
+			t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * t.nr_failures;
 			t.nr_failures = 0;
 			t.program = p;
 		} else {
 			if (++t.nr_failures == 50)
 				testcases.erase(testcases.begin() + testcase_i);
 			else
-				t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * (10 * t.nr_failures);
+				t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * t.nr_failures;
 		}
 	}
 
