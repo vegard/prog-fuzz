@@ -1763,36 +1763,63 @@ static bool build_and_run(program_ptr p)
 	return nr_new_bits > 0;
 }
 
+struct testcase {
+	program_ptr program;
+	unsigned int nr_failures;
+	double nr_transformations;
+
+	testcase(program_ptr p):
+		program(p),
+		nr_failures(0),
+		nr_transformations(10)
+	{
+	}
+};
+
 int main(int argc, char *argv[])
 {
 	re = std::default_random_engine(r());
 
 	// Seed the set of programs with some randomly generated ones
-	printf("Seeding initial set of test cases\n");
-	std::vector<program_ptr> programs;
-	for (unsigned int i = 0; i < 1000; ++i) {
-		printf("[%u]... ", i);
-		auto p = std::make_shared<program>(std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re));
-		for (unsigned int i = 0; i < 50; ++i) {
-			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
-			p = transformations[transformation_i](p);
-		}
+	std::vector<testcase> testcases;
 
-		build_and_run(p);
-		programs.push_back(p);
-	}
+	const float alpha = 0.85;
 
-	printf("Mutating test cases\n");
 	while (1) {
-		unsigned int program_i = std::uniform_int_distribution<unsigned int>(0, programs.size() - 1)(re);
-		auto p = programs[program_i];
-		for (unsigned int i = 0; i < 10; ++i) {
+		while (testcases.size() < 250) {
+			printf("[%3lu new]... ", testcases.size());
+
+			auto p = std::make_shared<program>(std::uniform_int_distribution<int>(std::numeric_limits<int>::min(), std::numeric_limits<int>::max())(re));
+			for (unsigned int i = 0; i < 50; ++i) {
+				unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
+				p = transformations[transformation_i](p);
+			}
+
+			if (build_and_run(p))
+				testcases.push_back(testcase(p));
+		}
+
+		unsigned int testcase_i = std::uniform_int_distribution<unsigned int>(0, testcases.size() - 1)(re);
+		auto &t = testcases[testcase_i];
+
+		printf("[%3u | %2u | %5.2f]... ", testcase_i, t.nr_failures, t.nr_transformations);
+
+		auto p = t.program;
+		for (unsigned int i = 0; i < (unsigned int) std::max(1, (int) ceil(t.nr_transformations)); ++i) {
 			unsigned int transformation_i = std::uniform_int_distribution<unsigned int>(0, transformations.size() - 1)(re);
 			p = transformations[transformation_i](p);
 		}
 
-		if (build_and_run(p))
-			programs[program_i] = p;
+		if (build_and_run(p)) {
+			t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * (10 * t.nr_failures);
+			t.nr_failures = 0;
+			t.program = p;
+		} else {
+			if (++t.nr_failures == 50)
+				testcases.erase(testcases.begin() + testcase_i);
+			else
+				t.nr_transformations = alpha * t.nr_transformations + (1 - alpha) * (10 * t.nr_failures);
+		}
 	}
 
 	return 0;
