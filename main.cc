@@ -129,7 +129,7 @@ static std::vector<node_ptr> find_leaves(node_ptr root)
 	return result;
 }
 
-#include "rules/cxx.hh"
+#include "rules/js.hh"
 
 static std::random_device r;
 static std::default_random_engine re;
@@ -282,7 +282,7 @@ int main(int argc, char *argv[])
 	snprintf(stderr_filename, sizeof(stderr_filename), "stderr/%lu-%d.txt", tv_start.tv_sec, getpid());
 
 	static char filename[PATH_MAX];
-	snprintf(filename, sizeof(filename), "output/%lu-%d.rs", tv_start.tv_sec, getpid());
+	snprintf(filename, sizeof(filename), "output/%lu-%d.js", tv_start.tv_sec, getpid());
 
 	unsigned int mutation_counters[nr_mutations] = {};
 	unsigned int trace_bits_counters[MAP_SIZE] = {};
@@ -365,7 +365,7 @@ int main(int argc, char *argv[])
 			//
 			// exec() the compiler. You need to substitute the path to your own compiler here.
 
-			if (execlp("/home/vegard/rust/build/x86_64-unknown-linux-gnu/stage2/bin/rustc", "/home/vegard/rust/build/x86_64-unknown-linux-gnu/stage2/bin/rustc", "--emit", "asm", "-Z", "unstable-options", "--error-format", "short", /*"-Z", "no-trans",*/ "-Z", "no-verify", "-Z", "fewer-names", "-Z", "query-threads=1", "-", NULL) == -1)
+			if (execlp("/home/vegard/git/gecko-dev/js/src/build-afl/dist/bin/js", "js", "--no-threads", "--fuzzing-safe", NULL) == -1)
 				error(EXIT_FAILURE, errno, "execvp()");
 		}
 
