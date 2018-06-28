@@ -153,7 +153,7 @@ struct testcase {
 
 		score -= mutations.size();
 
-#if 1
+#if 0
 		// We want test cases to grow in size until they reach a
 		// certain number of bytes, then we try to keep them there.
 		//
@@ -164,13 +164,16 @@ struct testcase {
 		score += ((size < max_size) ? max_size : size - max_size) / 5;
 #endif
 
-		score += -(int) generation;
+		score -= 10 * (int) generation;
 
 		// if a mutation has been used few times, we give the score a boost
-		score -= 2. * (mutation_counter + 1) / mutation_counter;
+		score -= 100. * (mutation_counter + 1) / mutation_counter;
 
 		// trace bits from AFL are very important
-		score += -10 * (int) new_bits;
+		score -= 100 * (int) new_bits;
+
+		// prefer test cases that can still be expanded
+		score -= 100 * (int) find_leaves(root).size();
 
 		// add a small random offset
 		score += std::normal_distribution<>(0, 100)(re);
@@ -293,6 +296,10 @@ int main(int argc, char *argv[])
 	unsigned int nr_execs_without_new_bits = 0;
 
 	while (true) {
+		struct timeval tv;
+		if (gettimeofday(&tv, 0) == -1)
+			error(EXIT_FAILURE, errno, "gettimeofday()");
+
 #if 0
 		printf("queue: ");
 		for (const auto &t: pq.set)
@@ -301,7 +308,23 @@ int main(int argc, char *argv[])
 #endif
 
 #if 1 // periodically resetting (restarting) everything seems beneficial for now; interesting future angle WRT SAT solver restarts
-		if (nr_execs_without_new_bits == 250) {
+		if (nr_execs_without_new_bits == 500) {
+			// Save the most interesting test case found so far, even if it's not a crash
+			if (!pq.empty()) {
+				auto current = pq.top();
+
+				static char filename[PATH_MAX];
+				snprintf(filename, sizeof(filename), "output/%lu-%d.js", tv.tv_sec, getpid());
+				printf("Writing test case to %s\n", filename);
+
+				FILE *fp = fopen(filename, "w");
+				if (!fp)
+					error(EXIT_FAILURE, errno, "fopen()");
+				current.root->print(fp);
+				fprintf(fp, "\n");
+				fclose(fp);
+			}
+
 			pq = fixed_priority_queue<testcase>(750);
 			for (unsigned int i = 0; i < nr_mutations; ++i)
 				mutation_counters[i] = 0;
@@ -335,15 +358,19 @@ int main(int argc, char *argv[])
 		unsigned int mutation = std::uniform_int_distribution<int>(0, nr_mutations - 1)(re);
 		auto root = mutate(current.root, leaf, mutation);
 
-		struct timeval tv;
-		if (gettimeofday(&tv, 0) == -1)
-			error(EXIT_FAILURE, errno, "gettimeofday()");
-
 		int pipefd[2];
 		if (pipe2(pipefd, 0) == -1)
 			error(EXIT_FAILURE, errno, "pipe2()");
 
 		setup_shm();
+
+		sigset_t mask = {};
+		sigemptyset(&mask);
+		sigaddset(&mask, SIGCHLD);
+
+		sigset_t orig_mask;
+		if (sigprocmask(SIG_BLOCK, &mask, &orig_mask) == -1)
+			error(EXIT_FAILURE, errno, "sigprocmask()");
 
 		pid_t child = fork();
 		if (child == -1)
@@ -365,7 +392,8 @@ int main(int argc, char *argv[])
 			//
 			// exec() the compiler. You need to substitute the path to your own compiler here.
 
-			if (execlp("/home/vegard/git/gecko-dev/js/src/build-afl/dist/bin/js", "js", "--no-threads", "--fuzzing-safe", NULL) == -1)
+			//if (execlp("/home/vegard/git/gecko-dev/js/src/build-afl/dist/bin/js", "js", "--no-threads", "--fuzzing-safe", "--compileonly", "--wasm-gc", "-", NULL) == -1)
+			if (execlp("/home/vegard/git/gecko-dev/js/src/build-afl/dist/bin/js", "js", "--no-threads", "--fuzzing-safe", "--wasm-gc", "-", NULL) == -1)
 				error(EXIT_FAILURE, errno, "execvp()");
 		}
 
@@ -375,6 +403,37 @@ int main(int argc, char *argv[])
 			error(EXIT_FAILURE, errno, "fdopen()");
 		root->print(f);
 		fclose(f);
+
+		unsigned int timeout_ms = 500;
+
+		struct timespec timeout;
+		timeout.tv_sec = timeout_ms / 1000;
+		timeout.tv_nsec = (timeout_ms % 1000) * 1000000;
+
+		bool killed = false;
+		while (true) {
+			if (sigtimedwait(&mask, NULL, &timeout) == -1) {
+				if (errno == EINTR)
+					continue;
+
+				if (errno == EAGAIN) {
+					printf("timeout; killing\n");
+
+					if (kill(child, SIGKILL) == -1)
+						error(EXIT_FAILURE, errno, "kill()");
+
+					killed = true;
+					break;
+				}
+
+				error(EXIT_FAILURE, errno, "sigtimedwait()");
+			}
+
+			break;
+		}
+
+		if (sigprocmask(SIG_UNBLOCK, &mask, NULL) == -1)
+			error(EXIT_FAILURE, errno, "sigprocmask()");
 
 		int status;
 		while (true) {
@@ -394,7 +453,7 @@ int main(int argc, char *argv[])
 
 		++nr_execs;
 
-		if (WIFSIGNALED(status)) {
+		if (WIFSIGNALED(status) && !killed) {
 #if 1 // Ignore segfaults for now, have to wait for a fix for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84576
 			printf("signal %d:\n", WTERMSIG(status));
 			root->print(stdout);
@@ -418,7 +477,7 @@ int main(int argc, char *argv[])
 				error(EXIT_FAILURE, errno, "fopen()");
 
 			static char buffer[100 * 4096];
-			size_t len = fread(buffer, 1, sizeof(buffer), f);
+			size_t len = fread(buffer, 1, sizeof(buffer) - 1, f);
 			fclose(f);
 
 			if (len > 0) {
@@ -426,6 +485,7 @@ int main(int argc, char *argv[])
 
 				//fwrite(buffer, 1, len, stdout);
 
+#if 0
 				// Check for ICEs, but ignore a set of specific ones which we've
 				// already reported and which keep showing up.
 				if ((strstr(buffer, "fatal error") || strstr(buffer, "egmentation") || strstr(buffer, "segfault") || strstr(buffer, "signal 6:") || strstr(buffer, "Assertion ") || strstr(buffer, "Aborted") || strstr(buffer, "internal compiler error")) && !strstr(buffer, "invalid loop id for break: not inside loop scope") && !strstr(buffer, "local_def_id: no entry for") && !strstr(buffer, "tuple struct pattern not applied to an ADT") && !strstr(buffer, "assertion failed: self.tcx.sess.err_count() > 0") && !strstr(buffer, "unexpected type for tuple pattern: TyError") && !strstr(buffer, "invalid loop id for break: label not found") && !strstr(buffer, "invalid loop id for continue: not inside loop scope")) {
@@ -444,6 +504,7 @@ int main(int argc, char *argv[])
 					remove_shm();
 					break;
 				}
+#endif
 			}
 		}
 
@@ -476,7 +537,7 @@ int main(int argc, char *argv[])
 			++nr_execs_without_new_bits;
 		}
 
-		if (nr_execs_without_new_bits > 150) {
+		if (nr_execs_without_new_bits > 25) {
 			pq.pop();
 		}
 
